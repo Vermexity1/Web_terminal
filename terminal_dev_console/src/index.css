@@ -1029,7 +1029,8 @@ button:disabled {
   flex: 1;
   min-height: 0;
   padding: 7px 8px;
-  overflow: hidden;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .problems-panel {
@@ -1118,6 +1119,14 @@ button:disabled {
 
 .terminal-host .xterm {
   height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.terminal-host .xterm-screen {
+  min-height: 100%;
 }
 
 .preview-panel {
