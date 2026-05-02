@@ -360,6 +360,131 @@ const appThemes = [
   { id: 'contrast', label: 'High Contrast' },
 ]
 
+const aiSettingsStorageKey = 'ide-ai-settings-v1'
+const aiUsageStorageKey = 'ide-ai-usage-v1'
+const geminiModels = [
+  {
+    id: 'gemini-3.1-flash-lite-preview',
+    label: 'Gemini 3.1 Flash-Lite',
+    inputPrice: 0.25,
+    outputPrice: 1.5,
+  },
+  {
+    id: 'gemini-3-flash-preview',
+    label: 'Gemini 3 Flash',
+    inputPrice: 0.5,
+    outputPrice: 3,
+  },
+  {
+    id: 'gemini-2.5-flash-lite',
+    label: 'Gemini 2.5 Flash-Lite',
+    inputPrice: 0.1,
+    outputPrice: 0.4,
+  },
+  {
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash',
+    inputPrice: 0.3,
+    outputPrice: 2.5,
+  },
+]
+
+function todayUsageKey() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function readJsonStorage(key, fallback) {
+  try {
+    const saved = localStorage.getItem(key)
+    return saved ? { ...fallback, ...JSON.parse(saved) } : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function defaultAiSettings() {
+  return {
+    apiKey: '',
+    model: 'gemini-3.1-flash-lite-preview',
+    priceMode: 'free',
+    dailyRequestLimit: 20,
+    dailyTokenLimit: 50000,
+    dailyBudgetUsd: 0,
+    maxOutputTokens: 1400,
+  }
+}
+
+function defaultAiUsage() {
+  return {
+    date: todayUsageKey(),
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+  }
+}
+
+function normalizeAiUsage(usage) {
+  const currentDate = todayUsageKey()
+  if (!usage || usage.date !== currentDate) return defaultAiUsage()
+  return { ...defaultAiUsage(), ...usage, date: currentDate }
+}
+
+function estimateTokens(text) {
+  return Math.max(1, Math.ceil(String(text || '').length / 4))
+}
+
+function getGeminiModel(modelId) {
+  return geminiModels.find((model) => model.id === modelId) || geminiModels[0]
+}
+
+function estimateGeminiCost(modelId, inputTokens, outputTokens, priceMode) {
+  if (priceMode === 'free') return 0
+  const model = getGeminiModel(modelId)
+  return (inputTokens / 1_000_000) * model.inputPrice + (outputTokens / 1_000_000) * model.outputPrice
+}
+
+function buildAiPrompt({ userPrompt, activeTab, files, frameworkName, projectName }) {
+  const fileList = files.slice(0, 120).map((file) => file.path).join('\n')
+  const activeFileBlock = activeTab
+    ? `Active file: ${activeTab.path}\n\n${activeTab.contents.slice(0, 24000)}`
+    : 'No active file is open.'
+
+  return `You are an AI coding assistant inside a browser IDE.
+Project: ${projectName}
+Framework: ${frameworkName}
+
+Workspace files:
+${fileList || '(empty workspace)'}
+
+${activeFileBlock}
+
+User request:
+${userPrompt}
+
+Return ONLY valid JSON. Do not use markdown fences.
+Schema:
+{
+  "message": "brief explanation",
+  "edits": [
+    { "path": "relative/file/path.ext", "content": "full replacement file content" }
+  ],
+  "commands": ["optional terminal command suggestions"]
+}
+
+Rules:
+- Use full file replacements only.
+- If you need to create a new file, include its full path and content.
+- Keep changes small and directly related to the request.
+- If no edit is needed, return an empty edits array.`
+}
+
+function parseAiJson(text) {
+  const trimmed = String(text || '').trim()
+  const jsonText = trimmed.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim()
+  return JSON.parse(jsonText)
+}
+
 function databaseRequest(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result)
@@ -869,6 +994,12 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(true)
   const [autosaveEnabled, setAutosaveEnabled] = useState(() => localStorage.getItem('ide-autosave') !== 'false')
   const [theme, setTheme] = useState(() => localStorage.getItem('ide-theme') || 'blackblue')
+  const [aiSettings, setAiSettings] = useState(() => readJsonStorage(aiSettingsStorageKey, defaultAiSettings()))
+  const [aiUsage, setAiUsage] = useState(() => normalizeAiUsage(readJsonStorage(aiUsageStorageKey, defaultAiUsage())))
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiResult, setAiResult] = useState(null)
+  const [aiStatus, setAiStatus] = useState('Add a Gemini key, set caps, then ask for a code change.')
+  const [isAiRunning, setIsAiRunning] = useState(false)
   const [terminalSessionKey, setTerminalSessionKey] = useState(0)
   const [layoutSizes, setLayoutSizes] = useState({
     explorer: 250,
@@ -1112,6 +1243,20 @@ export default function App() {
   }, [theme])
 
   useEffect(() => {
+    localStorage.setItem(aiSettingsStorageKey, JSON.stringify(aiSettings))
+  }, [aiSettings])
+
+  useEffect(() => {
+    const normalizedUsage = normalizeAiUsage(aiUsage)
+    if (normalizedUsage.date !== aiUsage.date) {
+      setAiUsage(normalizedUsage)
+      return
+    }
+
+    localStorage.setItem(aiUsageStorageKey, JSON.stringify(aiUsage))
+  }, [aiUsage])
+
+  useEffect(() => {
     getSavedSnapshot().then((snapshot) => {
       setHasSavedProject(Boolean(snapshot?.files?.length))
     })
@@ -1257,6 +1402,23 @@ export default function App() {
     [commandQuery, dynamicCommands, selectedCommandGroup],
   )
 
+  const aiUsageSummary = useMemo(() => {
+    const normalizedUsage = normalizeAiUsage(aiUsage)
+    const tokenLimit = Number(aiSettings.dailyTokenLimit) || 0
+    const requestLimit = Number(aiSettings.dailyRequestLimit) || 0
+    const budget = Number(aiSettings.dailyBudgetUsd) || 0
+    const usedTokens = normalizedUsage.inputTokens + normalizedUsage.outputTokens
+
+    return {
+      ...normalizedUsage,
+      usedTokens,
+      requestsLeft: Math.max(0, requestLimit - normalizedUsage.requests),
+      tokensLeft: Math.max(0, tokenLimit - usedTokens),
+      budgetLeft: Math.max(0, budget - normalizedUsage.estimatedCostUsd),
+      model: getGeminiModel(aiSettings.model),
+    }
+  }, [aiSettings, aiUsage])
+
   useEffect(() => {
     const query = searchQuery.trim().toLowerCase()
     if (!webcontainer || !query) {
@@ -1360,6 +1522,186 @@ export default function App() {
     await clearSavedSnapshot()
     setHasSavedProject(false)
     setOperationStatus('Saved browser project cleared.')
+  }, [])
+
+  const runAiCoder = useCallback(async () => {
+    const apiKey = aiSettings.apiKey.trim()
+    const request = aiPrompt.trim()
+
+    if (!apiKey) {
+      setAiStatus('Paste a Gemini API key first.')
+      return
+    }
+
+    if (!request) {
+      setAiStatus('Describe what you want the AI coder to change.')
+      return
+    }
+
+    const files = flattenTree(tree)
+    const prompt = buildAiPrompt({
+      userPrompt: request,
+      activeTab,
+      files,
+      frameworkName,
+      projectName,
+    })
+    const estimatedInputTokens = estimateTokens(prompt)
+    const estimatedOutputTokens = Number(aiSettings.maxOutputTokens) || 1400
+    const estimatedCost = estimateGeminiCost(
+      aiSettings.model,
+      estimatedInputTokens,
+      estimatedOutputTokens,
+      aiSettings.priceMode,
+    )
+    const currentUsage = normalizeAiUsage(aiUsage)
+    const currentTokens = currentUsage.inputTokens + currentUsage.outputTokens
+    const dailyRequestLimit = Number(aiSettings.dailyRequestLimit) || 0
+    const dailyTokenLimit = Number(aiSettings.dailyTokenLimit) || 0
+    const dailyBudgetUsd = Number(aiSettings.dailyBudgetUsd) || 0
+
+    if (currentUsage.requests + 1 > dailyRequestLimit) {
+      setAiStatus('Blocked: your local daily AI request cap has been reached.')
+      return
+    }
+
+    if (currentTokens + estimatedInputTokens + estimatedOutputTokens > dailyTokenLimit) {
+      setAiStatus('Blocked: this request would exceed your local daily token cap.')
+      return
+    }
+
+    if (aiSettings.priceMode !== 'free' && currentUsage.estimatedCostUsd + estimatedCost > dailyBudgetUsd) {
+      setAiStatus('Blocked: this request would exceed your local daily budget cap.')
+      return
+    }
+
+    setIsAiRunning(true)
+    setAiStatus('Asking Gemini for a patch...')
+    setAiResult(null)
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${aiSettings.model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature: 0.2,
+              maxOutputTokens: estimatedOutputTokens,
+            },
+          }),
+        },
+      )
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error?.message || `Gemini request failed (${response.status})`)
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n') || ''
+      const parsed = parseAiJson(text)
+      const usageMetadata = data.usageMetadata || {}
+      const actualInputTokens = usageMetadata.promptTokenCount || estimatedInputTokens
+      const actualOutputTokens =
+        usageMetadata.candidatesTokenCount ||
+        Math.max(estimateTokens(text), usageMetadata.totalTokenCount ? usageMetadata.totalTokenCount - actualInputTokens : 1)
+      const actualCost = estimateGeminiCost(
+        aiSettings.model,
+        actualInputTokens,
+        actualOutputTokens,
+        aiSettings.priceMode,
+      )
+
+      setAiUsage((current) => {
+        const normalized = normalizeAiUsage(current)
+        return {
+          ...normalized,
+          requests: normalized.requests + 1,
+          inputTokens: normalized.inputTokens + actualInputTokens,
+          outputTokens: normalized.outputTokens + actualOutputTokens,
+          estimatedCostUsd: normalized.estimatedCostUsd + actualCost,
+        }
+      })
+      setAiResult({
+        message: parsed.message || 'Gemini returned a proposed change.',
+        edits: Array.isArray(parsed.edits) ? parsed.edits : [],
+        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+        usage: {
+          inputTokens: actualInputTokens,
+          outputTokens: actualOutputTokens,
+          estimatedCostUsd: actualCost,
+        },
+      })
+      setAiStatus(`Ready: ${Array.isArray(parsed.edits) ? parsed.edits.length : 0} file edit(s) proposed.`)
+    } catch (error) {
+      setAiStatus(error.message)
+      addProblem('AI Coder', error.message)
+    } finally {
+      setIsAiRunning(false)
+    }
+  }, [
+    activeTab,
+    addProblem,
+    aiPrompt,
+    aiSettings,
+    aiUsage,
+    frameworkName,
+    projectName,
+    tree,
+  ])
+
+  const applyAiEdits = useCallback(async () => {
+    if (!webcontainer || !aiResult?.edits?.length) return
+
+    try {
+      for (const edit of aiResult.edits) {
+        const path = normalizePath(edit.path || '')
+        if (!path || typeof edit.content !== 'string') continue
+        const dir = parentPath(path)
+        if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
+        await webcontainer.fs.writeFile(path, edit.content)
+      }
+
+      await refreshExplorer(webcontainer)
+      await detectProjectDetails(webcontainer)
+      await saveCurrentSnapshot(webcontainer)
+
+      const firstEdit = aiResult.edits.find((edit) => edit.path)
+      if (firstEdit?.path) await openFile(normalizePath(firstEdit.path), webcontainer)
+
+      setPreviewKey((key) => key + 1)
+      setAiStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
+      setOperationStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
+    } catch (error) {
+      setAiStatus(`Apply failed: ${error.message}`)
+      addProblem('AI Apply', error.message)
+    }
+  }, [
+    addProblem,
+    aiResult,
+    detectProjectDetails,
+    openFile,
+    refreshExplorer,
+    saveCurrentSnapshot,
+    webcontainer,
+  ])
+
+  const resetAiUsage = useCallback(() => {
+    const nextUsage = defaultAiUsage()
+    setAiUsage(nextUsage)
+    localStorage.setItem(aiUsageStorageKey, JSON.stringify(nextUsage))
+    setAiStatus('Local AI usage counters reset.')
   }, [])
 
   const focusActivity = useCallback((activity) => {
@@ -2028,6 +2370,121 @@ export default function App() {
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
         </div>
+        <section className="ai-coder-panel">
+          <div className="ai-header">
+            <div>
+              <strong>AI Coder</strong>
+              <span>{aiSettings.priceMode === 'free' ? 'Free-tier local tracker' : 'Paid estimate tracker'}</span>
+            </div>
+            <button type="button" onClick={resetAiUsage}>Reset Usage</button>
+          </div>
+
+          <div className="ai-settings-grid">
+            <input
+              type="password"
+              value={aiSettings.apiKey}
+              placeholder="Gemini API key"
+              autoComplete="off"
+              onChange={(event) => setAiSettings((settings) => ({ ...settings, apiKey: event.target.value }))}
+            />
+            <select
+              value={aiSettings.model}
+              onChange={(event) => setAiSettings((settings) => ({ ...settings, model: event.target.value }))}
+            >
+              {geminiModels.map((model) => (
+                <option key={model.id} value={model.id}>{model.label}</option>
+              ))}
+            </select>
+            <label>
+              Mode
+              <select
+                value={aiSettings.priceMode}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, priceMode: event.target.value }))}
+              >
+                <option value="free">Free tier</option>
+                <option value="paid">Paid estimate</option>
+              </select>
+            </label>
+            <label>
+              Requests/day
+              <input
+                type="number"
+                min="1"
+                value={aiSettings.dailyRequestLimit}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyRequestLimit: Number(event.target.value) }))}
+              />
+            </label>
+            <label>
+              Tokens/day
+              <input
+                type="number"
+                min="1000"
+                step="1000"
+                value={aiSettings.dailyTokenLimit}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyTokenLimit: Number(event.target.value) }))}
+              />
+            </label>
+            <label>
+              Budget/day
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={aiSettings.dailyBudgetUsd}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyBudgetUsd: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+
+          <div className="ai-usage-bar">
+            <span>{aiUsageSummary.requestsLeft} req left</span>
+            <span>{aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
+            <span>${aiUsageSummary.estimatedCostUsd.toFixed(4)} spent</span>
+          </div>
+
+          <textarea
+            value={aiPrompt}
+            placeholder="Ask the AI coder to change the active file or create files..."
+            onChange={(event) => setAiPrompt(event.target.value)}
+          />
+
+          <div className="ai-actions">
+            <button type="button" disabled={isAiRunning} onClick={runAiCoder}>
+              {isAiRunning ? 'Thinking...' : 'Ask AI'}
+            </button>
+            <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
+              Apply Edits
+            </button>
+          </div>
+
+          <div className="ai-result">
+            <p>{aiStatus}</p>
+            {aiResult ? (
+              <>
+                <strong>{aiResult.message}</strong>
+                {aiResult.edits.length > 0 ? (
+                  <div className="ai-edit-list">
+                    {aiResult.edits.map((edit) => (
+                      <code key={`${edit.path}-${edit.content?.length || 0}`}>{edit.path}</code>
+                    ))}
+                  </div>
+                ) : null}
+                {aiResult.commands.length > 0 ? (
+                  <div className="ai-command-list">
+                    {aiResult.commands.map((command) => (
+                      <button key={command} type="button" onClick={() => runTerminalCommand(command)}>{command}</button>
+                    ))}
+                  </div>
+                ) : null}
+                <small>
+                  Last: {aiResult.usage.inputTokens.toLocaleString()} in /
+                  {' '}{aiResult.usage.outputTokens.toLocaleString()} out /
+                  {' '}${aiResult.usage.estimatedCostUsd.toFixed(5)}
+                </small>
+              </>
+            ) : null}
+          </div>
+        </section>
         <div className="preview-frame-wrap">
           {previewUrl ? (
             <iframe key={previewKey} title="WebContainer preview" src={previewUrl} />
