@@ -8,7 +8,7 @@
   "scripts": {
     "start": "npm start -w terminal_dev_console",
     "dev": "npm run dev -w terminal_dev_console",
-    "build": "npm run build -w terminal_dev_console",
+    "build": "npm run build -w terminal_dev_console && node scripts/copy-dist.mjs",
     "preview": "npm run preview -w terminal_dev_console"
   }
 }
