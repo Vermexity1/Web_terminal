@@ -417,6 +417,17 @@ const aiProviders = [
     ],
   },
   {
+    id: 'anthropic',
+    label: 'Claude',
+    keyPlaceholder: 'Anthropic API key',
+    endpoint: 'https://api.anthropic.com/v1/messages',
+    models: [
+      { id: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', inputPrice: 3, outputPrice: 15 },
+      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', inputPrice: 1, outputPrice: 5 },
+      { id: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1', inputPrice: 15, outputPrice: 75 },
+    ],
+  },
+  {
     id: 'custom',
     label: 'Custom OpenAI-Compatible',
     keyPlaceholder: 'API key',
@@ -525,6 +536,75 @@ function estimateAiCost(settings, inputTokens, outputTokens) {
   return (inputTokens / 1_000_000) * model.inputPrice + (outputTokens / 1_000_000) * model.outputPrice
 }
 
+function diffLineStats(before, after) {
+  const beforeLines = before ? String(before).replace(/\r\n/g, '\n').split('\n') : []
+  const afterLines = after ? String(after).replace(/\r\n/g, '\n').split('\n') : []
+
+  if (before === after) {
+    return {
+      added: 0,
+      removed: 0,
+      beforeLines: beforeLines.length,
+      afterLines: afterLines.length,
+    }
+  }
+
+  if (beforeLines.length * afterLines.length > 180000) {
+    return {
+      added: Math.max(0, afterLines.length - beforeLines.length),
+      removed: Math.max(0, beforeLines.length - afterLines.length),
+      beforeLines: beforeLines.length,
+      afterLines: afterLines.length,
+    }
+  }
+
+  let previous = new Array(afterLines.length + 1).fill(0)
+  let current = new Array(afterLines.length + 1).fill(0)
+
+  for (let beforeIndex = 1; beforeIndex <= beforeLines.length; beforeIndex += 1) {
+    for (let afterIndex = 1; afterIndex <= afterLines.length; afterIndex += 1) {
+      current[afterIndex] = beforeLines[beforeIndex - 1] === afterLines[afterIndex - 1]
+        ? previous[afterIndex - 1] + 1
+        : Math.max(previous[afterIndex], current[afterIndex - 1])
+    }
+    ;[previous, current] = [current, previous]
+    current.fill(0)
+  }
+
+  const unchanged = previous[afterLines.length]
+  return {
+    added: Math.max(0, afterLines.length - unchanged),
+    removed: Math.max(0, beforeLines.length - unchanged),
+    beforeLines: beforeLines.length,
+    afterLines: afterLines.length,
+  }
+}
+
+function summarizeChangeSet(edits, existingContents = {}) {
+  const changes = (edits || []).map((edit) => {
+    const path = normalizePath(edit.path || '')
+    const before = existingContents[path] || ''
+    const after = typeof edit.content === 'string' ? edit.content : ''
+    const stats = diffLineStats(before, after)
+
+    return {
+      path,
+      added: stats.added,
+      removed: stats.removed,
+      beforeLines: stats.beforeLines,
+      afterLines: stats.afterLines,
+      created: !before,
+    }
+  }).filter((change) => change.path)
+
+  return {
+    files: changes.length,
+    added: changes.reduce((total, change) => total + change.added, 0),
+    removed: changes.reduce((total, change) => total + change.removed, 0),
+    changes,
+  }
+}
+
 function buildAiPrompt({ userPrompt, activeTab, files, frameworkName, projectName }) {
   const fileList = files.slice(0, 120).map((file) => file.path).join('\n')
   const activeFileBlock = activeTab
@@ -607,6 +687,39 @@ async function requestAiCoder(settings, prompt, maxOutputTokens) {
       inputTokens: data.usageMetadata?.promptTokenCount,
       outputTokens: data.usageMetadata?.candidatesTokenCount,
       totalTokens: data.usageMetadata?.totalTokenCount,
+    }
+  }
+
+  if (settings.provider === 'anthropic') {
+    const response = await fetch(provider.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: model.id,
+        max_tokens: maxOutputTokens,
+        temperature: 0.2,
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+      }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error?.message || `Claude request failed (${response.status})`)
+
+    return {
+      text: data.content?.map((part) => (part.type === 'text' ? part.text : '')).join('\n') || '',
+      inputTokens: data.usage?.input_tokens,
+      outputTokens: data.usage?.output_tokens,
+      totalTokens: data.usage?.input_tokens && data.usage?.output_tokens
+        ? data.usage.input_tokens + data.usage.output_tokens
+        : undefined,
     }
   }
 
@@ -930,7 +1043,7 @@ async function readExplorerTree(webcontainer, dir = '') {
   return sortEntries(nodes)
 }
 
-function FileTree({ nodes, activePath, onOpenFile, onSelectPath, selectedPath, depth = 0 }) {
+function FileTree({ nodes, activePath, changedPaths = [], onOpenFile, onSelectPath, selectedPath, depth = 0 }) {
   return (
     <div className="file-tree">
       {nodes.map((node) => (
@@ -941,6 +1054,7 @@ function FileTree({ nodes, activePath, onOpenFile, onSelectPath, selectedPath, d
               node.type === 'directory' ? 'is-directory' : 'is-file',
               node.path === activePath ? 'is-active' : '',
               node.path === selectedPath ? 'is-selected' : '',
+              changedPaths.includes(node.path) ? 'is-ai-changed' : '',
             ].join(' ')}
             style={{ '--depth': depth }}
             type="button"
@@ -957,6 +1071,7 @@ function FileTree({ nodes, activePath, onOpenFile, onSelectPath, selectedPath, d
             <FileTree
               nodes={node.children}
               activePath={activePath}
+              changedPaths={changedPaths}
               selectedPath={selectedPath}
               onOpenFile={onOpenFile}
               onSelectPath={onSelectPath}
@@ -1165,9 +1280,18 @@ export default function App() {
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiResult, setAiResult] = useState(null)
   const [aiStatus, setAiStatus] = useState('Save an AI provider key, set caps, then ask for a code change.')
+  const [aiMessages, setAiMessages] = useState([
+    {
+      id: 'ai-welcome',
+      role: 'assistant',
+      content: 'Ask me for a code change. I will inspect the open workspace, propose edits, and show exactly which files and lines change before you apply them.',
+      changes: [],
+      status: 'ready',
+    },
+  ])
+  const [aiChangedPaths, setAiChangedPaths] = useState([])
   const [apiKeyStatus, setApiKeyStatus] = useState('')
   const [isAiRunning, setIsAiRunning] = useState(false)
-  const [rightPanelTab, setRightPanelTab] = useState('preview')
   const [bottomPanelTab, setBottomPanelTab] = useState('terminal')
   const [terminalSessionKey, setTerminalSessionKey] = useState(0)
   const [layoutSizes, setLayoutSizes] = useState({
@@ -1708,6 +1832,29 @@ export default function App() {
     setOperationStatus('Saved browser project cleared.')
   }, [])
 
+  const readCurrentFileContents = useCallback(async (paths) => {
+    const contents = {}
+
+    for (const rawPath of paths) {
+      const path = normalizePath(rawPath || '')
+      if (!path) continue
+
+      const openTab = tabs.find((tab) => tab.path === path)
+      if (openTab) {
+        contents[path] = openTab.contents
+        continue
+      }
+
+      try {
+        contents[path] = webcontainer ? await webcontainer.fs.readFile(path, 'utf-8') : ''
+      } catch {
+        contents[path] = ''
+      }
+    }
+
+    return contents
+  }, [tabs, webcontainer])
+
   const runAiCoder = useCallback(async () => {
     const provider = getAiProvider(aiSettings.provider)
     const apiKey = aiSettings.apiKeys?.[aiSettings.provider]?.trim()
@@ -1758,11 +1905,30 @@ export default function App() {
     setIsAiRunning(true)
     setAiStatus(`Asking ${provider.label} for a patch...`)
     setAiResult(null)
+    const userMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: request,
+    }
+    setAiMessages((messages) => [
+      ...messages,
+      userMessage,
+      {
+        id: `assistant-working-${Date.now()}`,
+        role: 'assistant',
+        content: `${provider.label} is reading the workspace and preparing a patch...`,
+        changes: [],
+        status: 'working',
+      },
+    ])
 
     try {
       const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
       const text = response.text
       const parsed = parseAiJson(text)
+      const edits = Array.isArray(parsed.edits) ? parsed.edits : []
+      const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
+      const changeSet = summarizeChangeSet(edits, existingContents)
       const actualInputTokens = response.inputTokens || estimatedInputTokens
       const actualOutputTokens =
         response.outputTokens ||
@@ -1780,19 +1946,48 @@ export default function App() {
         }
       })
       setAiResult({
-        message: parsed.message || 'Gemini returned a proposed change.',
-        edits: Array.isArray(parsed.edits) ? parsed.edits : [],
+        message: parsed.message || `${provider.label} returned a proposed change.`,
+        edits,
         commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+        changeSet,
         usage: {
           inputTokens: actualInputTokens,
           outputTokens: actualOutputTokens,
           estimatedCostUsd: actualCost,
         },
       })
-      setAiStatus(`Ready: ${Array.isArray(parsed.edits) ? parsed.edits.length : 0} file edit(s) proposed.`)
+      setAiChangedPaths(changeSet.changes.map((change) => change.path))
+      setAiMessages((messages) => [
+        ...messages.filter((message) => message.status !== 'working'),
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: parsed.message || `${provider.label} returned a proposed change.`,
+          changes: changeSet.changes,
+          commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+          usage: {
+            inputTokens: actualInputTokens,
+            outputTokens: actualOutputTokens,
+            estimatedCostUsd: actualCost,
+          },
+          status: 'proposed',
+        },
+      ])
+      setAiPrompt('')
+      setAiStatus(`Ready: ${edits.length} file edit(s), +${changeSet.added} / -${changeSet.removed} lines proposed.`)
     } catch (error) {
       setAiStatus(error.message)
       addProblem('AI Coder', error.message)
+      setAiMessages((messages) => [
+        ...messages.filter((message) => message.status !== 'working'),
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          content: error.message,
+          changes: [],
+          status: 'error',
+        },
+      ])
     } finally {
       setIsAiRunning(false)
     }
@@ -1804,6 +1999,7 @@ export default function App() {
     aiUsage,
     frameworkName,
     projectName,
+    readCurrentFileContents,
     tree,
   ])
 
@@ -1829,6 +2025,11 @@ export default function App() {
       setPreviewKey((key) => key + 1)
       setAiStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
       setOperationStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
+      setAiMessages((messages) => messages.map((message) => (
+        message.status === 'proposed'
+          ? { ...message, status: 'applied', content: `${message.content} Applied to the workspace.` }
+          : message
+      )))
     } catch (error) {
       setAiStatus(`Apply failed: ${error.message}`)
       addProblem('AI Apply', error.message)
@@ -1905,7 +2106,7 @@ export default function App() {
     if (activity === 'explorer') {
       setLayoutSizes((sizes) => ({ ...sizes, explorer: Math.max(sizes.explorer, 250) }))
       explorerPanelRef.current?.focus({ preventScroll: true })
-      setOperationStatus('Explorer focused.')
+      setOperationStatus('AI coder and files focused.')
       return
     }
 
@@ -1917,7 +2118,6 @@ export default function App() {
       return
     }
 
-    setRightPanelTab('preview')
     setLayoutSizes((sizes) => ({ ...sizes, preview: Math.max(sizes.preview, 560) }))
     previewPanelRef.current?.focus({ preventScroll: true })
     setOperationStatus('Preview focused.')
@@ -2205,6 +2405,205 @@ export default function App() {
     runTerminalCommand(command)
   }, [activeTab, runTerminalCommand, saveActiveFile])
 
+  const aiCoderPanel = (
+    <section className="ai-coder-panel left-ai-panel is-active">
+      <div className="ai-header">
+        <div>
+          <strong>AI Coder</strong>
+          <span>{aiUsageSummary.provider.label} / {aiSettings.priceMode === 'free' ? 'Free-tier local tracker' : 'Paid estimate tracker'}</span>
+        </div>
+        <button type="button" onClick={resetAiUsage}>Reset Usage</button>
+      </div>
+
+      <div className="ai-settings-grid">
+        <label className="ai-wide">
+          Provider
+          <select
+            value={aiSettings.provider}
+            onChange={(event) => setAiSettings((settings) => ({
+              ...settings,
+              provider: event.target.value,
+              models: { ...defaultModelsByProvider, ...settings.models },
+            }))}
+          >
+            {aiProviders.map((provider) => (
+              <option key={provider.id} value={provider.id}>{provider.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="ai-wide">
+          API key
+          <input
+            type="password"
+            value={aiSettings.draftApiKey}
+            placeholder={aiUsageSummary.provider.keyPlaceholder}
+            autoComplete="off"
+            onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
+          />
+        </label>
+        <div className="ai-key-actions ai-wide">
+          <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
+          <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
+          <span>{apiKeyStatus || (aiSettings.apiKeys?.[aiSettings.provider] ? 'Saved in this browser.' : 'No key saved for this provider.')}</span>
+        </div>
+        {aiSettings.provider === 'custom' ? (
+          <>
+            <label className="ai-wide">
+              Endpoint
+              <input
+                type="url"
+                value={aiSettings.customEndpoint}
+                placeholder="https://api.example.com/v1/chat/completions"
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, customEndpoint: event.target.value }))}
+              />
+            </label>
+            <label>
+              Model
+              <input
+                type="text"
+                value={aiSettings.customModel}
+                placeholder="model-name"
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, customModel: event.target.value }))}
+              />
+            </label>
+          </>
+        ) : (
+          <label>
+            Model
+            <select
+              value={aiSettings.models?.[aiSettings.provider] || aiUsageSummary.provider.models[0].id}
+              onChange={(event) => setAiSettings((settings) => ({
+                ...settings,
+                models: {
+                  ...defaultModelsByProvider,
+                  ...settings.models,
+                  [settings.provider]: event.target.value,
+                },
+              }))}
+            >
+              {aiUsageSummary.provider.models.map((model) => (
+                <option key={model.id} value={model.id}>{model.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          Mode
+          <select
+            value={aiSettings.priceMode}
+            onChange={(event) => setAiSettings((settings) => ({ ...settings, priceMode: event.target.value }))}
+          >
+            <option value="free">Free tier</option>
+            <option value="paid">Paid estimate</option>
+          </select>
+        </label>
+        <label>
+          Requests/day
+          <input
+            type="number"
+            min="1"
+            value={aiSettings.dailyRequestLimit}
+            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyRequestLimit: Number(event.target.value) }))}
+          />
+        </label>
+        <label>
+          Tokens/day
+          <input
+            type="number"
+            min="1000"
+            step="1000"
+            value={aiSettings.dailyTokenLimit}
+            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyTokenLimit: Number(event.target.value) }))}
+          />
+        </label>
+        <label>
+          Budget/day
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={aiSettings.dailyBudgetUsd}
+            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyBudgetUsd: Number(event.target.value) }))}
+          />
+        </label>
+      </div>
+
+      <div className="ai-usage-bar">
+        <span>{aiUsageSummary.requestsLeft} req left</span>
+        <span>{aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
+        <span>${aiUsageSummary.estimatedCostUsd.toFixed(4)} spent</span>
+      </div>
+
+      <div className="ai-chat-log" aria-live="polite">
+        {aiMessages.map((message) => (
+          <article className={`ai-message is-${message.role} ${message.status ? `is-${message.status}` : ''}`} key={message.id}>
+            <p>{message.content}</p>
+            {message.changes?.length ? (
+              <div className="ai-change-list">
+                {message.changes.map((change) => (
+                  <button key={change.path} type="button" title={change.path} onClick={() => openFile(change.path)}>
+                    <span>{change.path}</span>
+                    <small>+{change.added} / -{change.removed} lines</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {message.commands?.length ? (
+              <div className="ai-command-list">
+                {message.commands.map((command) => (
+                  <button key={command} type="button" onClick={() => runTerminalCommand(command)}>{command}</button>
+                ))}
+              </div>
+            ) : null}
+            {message.usage ? (
+              <small>
+                {message.usage.inputTokens.toLocaleString()} in / {message.usage.outputTokens.toLocaleString()} out /
+                {' '}${message.usage.estimatedCostUsd.toFixed(5)}
+              </small>
+            ) : null}
+          </article>
+        ))}
+      </div>
+
+      {aiResult?.changeSet?.changes?.length ? (
+        <div className="ai-change-summary">
+          <strong>{aiResult.changeSet.files} file(s), +{aiResult.changeSet.added} / -{aiResult.changeSet.removed} lines</strong>
+          <div className="ai-edit-list">
+            {aiResult.changeSet.changes.map((change) => (
+              <code key={change.path}>{change.path}</code>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <form
+        className="ai-compose"
+        onSubmit={(event) => {
+          event.preventDefault()
+          runAiCoder()
+        }}
+      >
+        <textarea
+          value={aiPrompt}
+          placeholder="Tell the AI coder what to change..."
+          onChange={(event) => setAiPrompt(event.target.value)}
+        />
+        <div className="ai-actions">
+          <button type="submit" disabled={isAiRunning}>
+            {isAiRunning ? 'Thinking...' : 'Ask AI'}
+          </button>
+          <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
+            Apply Changes
+          </button>
+        </div>
+      </form>
+
+      <div className="ai-result">
+        <p>{aiStatus}</p>
+      </div>
+    </section>
+  )
+
   return (
     <div
       className={`ide-shell theme-${theme} mobile-activity-${activeActivity}`}
@@ -2290,15 +2689,7 @@ export default function App() {
         tabIndex={-1}
       >
         <div className="panel-header">
-          <span>Explorer</span>
-        </div>
-        <div className="explorer-actions">
-          <button type="button" title="Open local folder" disabled={!webcontainer || isImporting || isInstalling} onClick={openLocalFolder}>Open</button>
-          <button type="button" title="Open files" disabled={!webcontainer || isImporting} onClick={openLocalFiles}>Files</button>
-          <button type="button" title="New file" onClick={() => createEntry('file')}>New</button>
-          <button type="button" title="New folder" onClick={() => createEntry('directory')}>Folder</button>
-          <button type="button" title="Rename" disabled={!selectedPath} onClick={renameEntry}>Rename</button>
-          <button type="button" title="Delete" disabled={!selectedPath} onClick={deleteEntry}>Delete</button>
+          <span>Assistant</span>
         </div>
         <input
           ref={folderInputRef}
@@ -2320,25 +2711,29 @@ export default function App() {
           <span className={bootStatus === 'Ready' ? 'status-ok' : 'status-busy'} />
           {bootStatus}
         </div>
-        <div className="project-summary">
-          <span>Workspace</span>
-          <strong>{projectName}</strong>
-          <small>{frameworkName} project running inside the browser WebContainer.</small>
-          {hasSavedProject ? (
-            <div className="saved-tools">
-              <button type="button" onClick={restoreSavedProject}>Restore saved</button>
-              <button type="button" onClick={clearBrowserProject}>Clear save</button>
-            </div>
-          ) : null}
+        {aiCoderPanel}
+        <div className="file-dock-header">
+          <div>
+            <strong>Files</strong>
+            <span>{projectName}</span>
+          </div>
+          <div className="file-dock-actions">
+            <button type="button" title="Search files" onClick={() => setSearchQuery((query) => (query ? '' : ' '))}>Search</button>
+            <button type="button" title="New file" onClick={() => createEntry('file')}>New</button>
+            <button type="button" title="New folder" onClick={() => createEntry('directory')}>Folder</button>
+            <button type="button" title="Rename" disabled={!selectedPath} onClick={renameEntry}>Rename</button>
+            <button type="button" title="Delete" disabled={!selectedPath} onClick={deleteEntry}>Delete</button>
+          </div>
         </div>
-        <div className="project-search">
-          <input
-            type="search"
-            value={searchQuery}
-            placeholder="Search files and text..."
-            onChange={(event) => setSearchQuery(event.target.value)}
-          />
-          {searchQuery ? (
+        {searchQuery ? (
+          <div className="project-search compact-search">
+            <input
+              type="search"
+              value={searchQuery.trimStart()}
+              placeholder="Search files and text..."
+              onChange={(event) => setSearchQuery(event.target.value)}
+              autoFocus
+            />
             <div className="search-results">
               {isSearching ? <p>Searching...</p> : null}
               {!isSearching && searchResults.length === 0 ? <p>No matches</p> : null}
@@ -2355,13 +2750,14 @@ export default function App() {
                 </button>
               ))}
             </div>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
         <div className="explorer-scroll">
           {tree.length > 0 ? (
             <FileTree
               nodes={tree}
               activePath={activePath}
+              changedPaths={aiChangedPaths}
               selectedPath={selectedPath}
               onOpenFile={openFile}
               onSelectPath={setSelectedPath}
@@ -2396,7 +2792,11 @@ export default function App() {
             {tabs.length > 0 ? (
               tabs.map((tab) => (
                 <button
-                  className={`tab ${tab.path === activePath ? 'is-active' : ''}`}
+                  className={[
+                    'tab',
+                    tab.path === activePath ? 'is-active' : '',
+                    aiChangedPaths.includes(tab.path) ? 'is-ai-changed' : '',
+                  ].join(' ')}
                   key={tab.path}
                   type="button"
                   title={tab.path}
@@ -2583,207 +2983,18 @@ export default function App() {
         tabIndex={-1}
       >
         <div className="preview-toolbar">
-          <div className="right-panel-tabs" role="tablist" aria-label="Right panel">
-            <button
-              className={rightPanelTab === 'preview' ? 'is-active' : ''}
-              type="button"
-              onClick={() => setRightPanelTab('preview')}
-            >
-              Preview
-            </button>
-            <button
-              className={rightPanelTab === 'ai' ? 'is-active' : ''}
-              type="button"
-              onClick={() => setRightPanelTab('ai')}
-            >
-              AI Coder
-            </button>
+          <div>
+            <strong>Preview</strong>
+            <span>{devStatus}</span>
           </div>
-          {rightPanelTab === 'preview' ? (
           <div className="preview-actions">
             <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
             <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
-          ) : (
-            <span className="right-panel-status">{aiUsageSummary.requestsLeft} req / {aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
-          )}
         </div>
-        <section className={`ai-coder-panel ${rightPanelTab === 'ai' ? 'is-active' : ''}`}>
-          <div className="ai-header">
-            <div>
-              <strong>AI Coder</strong>
-              <span>
-                {aiUsageSummary.provider.label} / {aiSettings.priceMode === 'free' ? 'Free-tier local tracker' : 'Paid estimate tracker'}
-              </span>
-            </div>
-            <button type="button" onClick={resetAiUsage}>Reset Usage</button>
-          </div>
-
-          <div className="ai-settings-grid">
-            <label className="ai-wide">
-              Provider
-              <select
-                value={aiSettings.provider}
-                onChange={(event) => setAiSettings((settings) => ({
-                  ...settings,
-                  provider: event.target.value,
-                  models: { ...defaultModelsByProvider, ...settings.models },
-                }))}
-              >
-                {aiProviders.map((provider) => (
-                  <option key={provider.id} value={provider.id}>{provider.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="ai-wide">
-              API key
-              <input
-                type="password"
-                value={aiSettings.draftApiKey}
-                placeholder={aiUsageSummary.provider.keyPlaceholder}
-                autoComplete="off"
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
-              />
-            </label>
-            <div className="ai-key-actions ai-wide">
-              <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
-              <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
-              <span>{apiKeyStatus || (aiSettings.apiKeys?.[aiSettings.provider] ? 'Saved in this browser.' : 'No key saved for this provider.')}</span>
-            </div>
-            {aiSettings.provider === 'custom' ? (
-              <>
-                <label className="ai-wide">
-                  Endpoint
-                  <input
-                    type="url"
-                    value={aiSettings.customEndpoint}
-                    placeholder="https://api.example.com/v1/chat/completions"
-                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customEndpoint: event.target.value }))}
-                  />
-                </label>
-                <label>
-                  Model
-                  <input
-                    type="text"
-                    value={aiSettings.customModel}
-                    placeholder="model-name"
-                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customModel: event.target.value }))}
-                  />
-                </label>
-              </>
-            ) : (
-              <label>
-                Model
-                <select
-                  value={aiSettings.models?.[aiSettings.provider] || aiUsageSummary.provider.models[0].id}
-                  onChange={(event) => setAiSettings((settings) => ({
-                    ...settings,
-                    models: {
-                      ...defaultModelsByProvider,
-                      ...settings.models,
-                      [settings.provider]: event.target.value,
-                    },
-                  }))}
-                >
-                  {aiUsageSummary.provider.models.map((model) => (
-                    <option key={model.id} value={model.id}>{model.label}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <label>
-              Mode
-              <select
-                value={aiSettings.priceMode}
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, priceMode: event.target.value }))}
-              >
-                <option value="free">Free tier</option>
-                <option value="paid">Paid estimate</option>
-              </select>
-            </label>
-            <label>
-              Requests/day
-              <input
-                type="number"
-                min="1"
-                value={aiSettings.dailyRequestLimit}
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyRequestLimit: Number(event.target.value) }))}
-              />
-            </label>
-            <label>
-              Tokens/day
-              <input
-                type="number"
-                min="1000"
-                step="1000"
-                value={aiSettings.dailyTokenLimit}
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyTokenLimit: Number(event.target.value) }))}
-              />
-            </label>
-            <label>
-              Budget/day
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={aiSettings.dailyBudgetUsd}
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyBudgetUsd: Number(event.target.value) }))}
-              />
-            </label>
-          </div>
-
-          <div className="ai-usage-bar">
-            <span>{aiUsageSummary.requestsLeft} req left</span>
-            <span>{aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
-            <span>${aiUsageSummary.estimatedCostUsd.toFixed(4)} spent</span>
-          </div>
-
-          <textarea
-            value={aiPrompt}
-            placeholder="Ask the AI coder to change the active file or create files..."
-            onChange={(event) => setAiPrompt(event.target.value)}
-          />
-
-          <div className="ai-actions">
-            <button type="button" disabled={isAiRunning} onClick={runAiCoder}>
-              {isAiRunning ? 'Thinking...' : 'Ask AI'}
-            </button>
-            <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
-              Apply Edits
-            </button>
-          </div>
-
-          <div className="ai-result">
-            <p>{aiStatus}</p>
-            {aiResult ? (
-              <>
-                <strong>{aiResult.message}</strong>
-                {aiResult.edits.length > 0 ? (
-                  <div className="ai-edit-list">
-                    {aiResult.edits.map((edit) => (
-                      <code key={`${edit.path}-${edit.content?.length || 0}`}>{edit.path}</code>
-                    ))}
-                  </div>
-                ) : null}
-                {aiResult.commands.length > 0 ? (
-                  <div className="ai-command-list">
-                    {aiResult.commands.map((command) => (
-                      <button key={command} type="button" onClick={() => runTerminalCommand(command)}>{command}</button>
-                    ))}
-                  </div>
-                ) : null}
-                <small>
-                  Last: {aiResult.usage.inputTokens.toLocaleString()} in /
-                  {' '}{aiResult.usage.outputTokens.toLocaleString()} out /
-                  {' '}${aiResult.usage.estimatedCostUsd.toFixed(5)}
-                </small>
-              </>
-            ) : null}
-          </div>
-        </section>
-        <div className={`preview-frame-wrap ${rightPanelTab === 'preview' ? 'is-active' : ''}`}>
+        <div className="preview-frame-wrap is-active">
           {previewUrl ? (
             <iframe key={previewKey} title="WebContainer preview" src={previewUrl} />
           ) : (
