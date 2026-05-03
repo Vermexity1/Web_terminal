@@ -1644,18 +1644,57 @@ function AiWorkingAnimation({ phase = 'thinking', steps = [] }) {
   )
 }
 
-function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit, onTryDemo }) {
+function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit, onDemoAction }) {
   const isSignup = mode === 'signup'
 
   return (
     <main className="auth-shell">
-      <section className="auth-visual" aria-hidden="true">
+      <section className="auth-visual auth-demo-visual" aria-label="Demo project">
         <div className="auth-grid" />
-        <div className="auth-terminal-card">
-          <span>browser-terminal</span>
-          <strong>Run projects in the browser.</strong>
-          <code>$ npm run dev</code>
-          <code>$ ask agent "build this"</code>
+        <div className="auth-demo-workbench">
+          <div className="auth-demo-head">
+            <div>
+              <span>preinstalled test</span>
+              <strong>Neon Runner Demo</strong>
+            </div>
+            <code>Vite game</code>
+          </div>
+
+          <div className="auth-demo-code">
+            <div>
+              <span>package.json</span>
+              <code>"scripts": {"{"} "start": "vite", "build": "vite build" {"}"}</code>
+            </div>
+            <div>
+              <span>src/main.js</span>
+              <code>jump(); spawnBlock(); drawFrame();</code>
+            </div>
+            <div>
+              <span>src/styles.css</span>
+              <code>canvas {"{"} background: radial-gradient(...) {"}"}</code>
+            </div>
+          </div>
+
+          <div className="auth-demo-actions" aria-label="Demo commands">
+            <button type="button" onClick={() => onDemoAction('install')}>Install</button>
+            <button type="button" onClick={() => onDemoAction('build')}>Run Build</button>
+            <button type="button" onClick={() => onDemoAction('start')}>Start</button>
+          </div>
+
+          <div className="auth-demo-display" aria-label="Demo display preview">
+            <div className="demo-game-sky">
+              <span className="demo-star one" />
+              <span className="demo-star two" />
+              <span className="demo-star three" />
+            </div>
+            <div className="demo-game-hud">
+              <span>NEON RUNNER</span>
+              <strong>00042</strong>
+            </div>
+            <span className="demo-runner" />
+            <span className="demo-obstacle" />
+            <span className="demo-track" />
+          </div>
         </div>
       </section>
       <section className="auth-panel" aria-label={isSignup ? 'Create account' : 'Sign in'}>
@@ -1713,15 +1752,6 @@ function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onS
             {isSignup ? 'Create Account' : 'Sign In'}
           </button>
         </form>
-        <div className="auth-demo-card">
-          <div>
-            <strong>Neon Runner Demo</strong>
-            <span>Open a temporary test project with a runnable game.</span>
-          </div>
-          <button type="button" className="auth-demo-action" onClick={onTryDemo}>
-            Try Demo
-          </button>
-        </div>
         {error ? <p className="auth-error">{error}</p> : null}
         {status ? <p className="auth-status">{status}</p> : null}
       </section>
@@ -1857,6 +1887,8 @@ export default function App() {
   const cloudSettingsTimerRef = useRef(null)
   const activeCloudProjectRef = useRef(null)
   const loadedCloudProjectIdRef = useRef('')
+  const pendingDemoActionRef = useRef('')
+  const pendingTerminalCommandRef = useRef('')
   const lastProblemRef = useRef('')
   const projectNameRef = useRef(projectName)
 
@@ -1952,7 +1984,7 @@ export default function App() {
     theme,
   ])
 
-  const handleTryDemo = useCallback(() => {
+  const handleDemoAction = useCallback((action = 'start') => {
     const now = Date.now()
     const demoSettings = buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings })
     const demoProject = {
@@ -1966,7 +1998,8 @@ export default function App() {
     }
 
     setAuthError('')
-    setAuthStatus('Loading Neon Runner demo...')
+    pendingDemoActionRef.current = action
+    setAuthStatus(`Loading Neon Runner demo for ${action === 'build' ? 'npm run build' : action === 'install' ? 'npm install' : 'npm start'}...`)
     setIsDemoSession(true)
     setCurrentUser({
       id: 'demo_user',
@@ -2449,6 +2482,12 @@ export default function App() {
       if (bufferedTerminalOutputRef.current) {
         api.write(bufferedTerminalOutputRef.current)
         bufferedTerminalOutputRef.current = ''
+      }
+      if (pendingTerminalCommandRef.current) {
+        const command = pendingTerminalCommandRef.current
+        pendingTerminalCommandRef.current = ''
+        api.run(command)
+        setOperationStatus(`Running: ${command}`)
       }
     },
     [],
@@ -3519,7 +3558,22 @@ export default function App() {
     }).then(async () => {
       if (activeCloudProject.isDemo) {
         await openFile('src/main.js', webcontainer)
-        setOperationStatus('Demo game loaded. Run npm install, then npm run dev.')
+        const action = pendingDemoActionRef.current
+        const command = action === 'install'
+          ? 'npm install'
+          : action === 'build'
+            ? 'npm run build'
+            : 'npm start'
+        pendingDemoActionRef.current = ''
+        setActiveActivity('commands')
+        setBottomPanelTab('terminal')
+        if (terminalApiRef.current) {
+          terminalApiRef.current.run(command)
+          setOperationStatus(`Demo loaded. Running: ${command}`)
+        } else {
+          pendingTerminalCommandRef.current = command
+          setOperationStatus(`Demo loaded. Waiting for terminal to run: ${command}`)
+        }
       } else {
         setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
       }
@@ -3985,7 +4039,7 @@ export default function App() {
         }}
         onFormChange={setAuthForm}
         onSubmit={handleAuthSubmit}
-        onTryDemo={handleTryDemo}
+        onDemoAction={handleDemoAction}
       />
     )
   }

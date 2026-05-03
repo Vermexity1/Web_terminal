@@ -146,6 +146,228 @@ button {
   white-space: nowrap;
 }
 
+.auth-demo-visual {
+  display: grid;
+  align-content: center;
+  padding: clamp(18px, 4vw, 38px);
+}
+
+.auth-demo-workbench {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 14px;
+  width: min(100%, 760px);
+  margin: 0 auto;
+  padding: 18px;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  border-radius: 12px;
+  background: rgba(4, 8, 17, 0.82);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42), 0 0 42px rgba(37, 99, 235, 0.14);
+  backdrop-filter: blur(18px);
+  animation: authCardRise 700ms ease both;
+}
+
+.auth-demo-head,
+.auth-demo-actions,
+.demo-game-hud {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-demo-head span {
+  display: block;
+  color: #60a5fa;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.auth-demo-head strong {
+  display: block;
+  margin-top: 4px;
+  color: #f8fbff;
+  font-size: clamp(1.7rem, 4.4vw, 3.7rem);
+  line-height: 0.95;
+}
+
+.auth-demo-head code {
+  flex: 0 0 auto;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #bfdbfe;
+  background: rgba(2, 6, 23, 0.72);
+  font-size: 0.72rem;
+}
+
+.auth-demo-code {
+  display: grid;
+  gap: 7px;
+}
+
+.auth-demo-code div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(96, 165, 250, 0.12);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: rgba(2, 6, 23, 0.52);
+}
+
+.auth-demo-code span,
+.auth-demo-code code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-demo-code span {
+  color: #93c5fd;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.auth-demo-code code {
+  color: #dbeafe;
+  font-size: 0.72rem;
+}
+
+.auth-demo-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.auth-demo-actions button {
+  height: 36px;
+  min-width: 0;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  border-radius: 7px;
+  color: #dce8f8;
+  background: rgba(5, 14, 30, 0.82);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.auth-demo-actions button:hover {
+  border-color: rgba(147, 197, 253, 0.72);
+  background: rgba(37, 99, 235, 0.24);
+}
+
+.auth-demo-display {
+  position: relative;
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 70% 20%, rgba(96, 165, 250, 0.22), transparent 24%),
+    linear-gradient(180deg, #061225 0%, #07111f 62%, #020617 100%);
+}
+
+.demo-game-sky,
+.demo-track {
+  position: absolute;
+  inset: 0;
+}
+
+.demo-star {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #93c5fd;
+  box-shadow: 0 0 18px rgba(147, 197, 253, 0.8);
+}
+
+.demo-star.one {
+  left: 18%;
+  top: 26%;
+}
+
+.demo-star.two {
+  right: 20%;
+  top: 34%;
+}
+
+.demo-star.three {
+  left: 48%;
+  top: 15%;
+}
+
+.demo-game-hud {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 12px;
+  color: #dbeafe;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.demo-game-hud strong {
+  color: #60a5fa;
+}
+
+.demo-track {
+  top: auto;
+  height: 62px;
+  bottom: 0;
+  background:
+    linear-gradient(90deg, rgba(96, 165, 250, 0.24) 0 22px, transparent 22px 42px) 0 36px / 42px 3px repeat-x,
+    linear-gradient(180deg, rgba(59, 130, 246, 0.34), rgba(2, 6, 23, 0.96));
+  animation: demoTrackMove 760ms linear infinite;
+}
+
+.demo-runner {
+  position: absolute;
+  left: 18%;
+  bottom: 54px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #60a5fa, #dbeafe);
+  box-shadow: 0 0 24px rgba(96, 165, 250, 0.62);
+  animation: demoRunnerHop 1.4s ease-in-out infinite;
+}
+
+.demo-obstacle {
+  position: absolute;
+  right: 18%;
+  bottom: 54px;
+  width: 28px;
+  height: 42px;
+  border-radius: 6px 6px 2px 2px;
+  background: linear-gradient(180deg, #1d4ed8, #0f172a);
+  box-shadow: 0 0 20px rgba(37, 99, 235, 0.55);
+}
+
+@keyframes demoTrackMove {
+  to {
+    background-position: -42px 36px, 0 0;
+  }
+}
+
+@keyframes demoRunnerHop {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+
+  50% {
+    transform: translateY(-18px) rotate(8deg);
+  }
+}
+
 .auth-panel,
 .project-create,
 .project-list {
@@ -2906,7 +3128,7 @@ body.is-resizing * {
   }
 
   .auth-visual {
-    min-height: 280px;
+    min-height: 420px;
   }
 
   .auth-terminal-card {
@@ -2918,6 +3140,32 @@ body.is-resizing * {
 
   .auth-terminal-card strong {
     font-size: 2rem;
+  }
+
+  .auth-demo-visual {
+    padding: 12px;
+  }
+
+  .auth-demo-workbench {
+    padding: 14px;
+  }
+
+  .auth-demo-head {
+    align-items: flex-start;
+    display: grid;
+  }
+
+  .auth-demo-code div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .auth-demo-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .auth-demo-display {
+    min-height: 180px;
   }
 
   .project-shell {
