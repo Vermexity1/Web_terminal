@@ -1000,11 +1000,13 @@ export default function App() {
   const [aiResult, setAiResult] = useState(null)
   const [aiStatus, setAiStatus] = useState('Add a Gemini key, set caps, then ask for a code change.')
   const [isAiRunning, setIsAiRunning] = useState(false)
+  const [rightPanelTab, setRightPanelTab] = useState('preview')
+  const [bottomPanelTab, setBottomPanelTab] = useState('terminal')
   const [terminalSessionKey, setTerminalSessionKey] = useState(0)
   const [layoutSizes, setLayoutSizes] = useState({
     explorer: 250,
-    preview: 430,
-    terminal: 410,
+    preview: 560,
+    terminal: 300,
   })
 
   const terminalApiRef = useRef(null)
@@ -1704,6 +1706,16 @@ export default function App() {
     setAiStatus('Local AI usage counters reset.')
   }, [])
 
+  const selectBottomPanelTab = useCallback((tab) => {
+    setBottomPanelTab(tab)
+    if (tab === 'terminal') {
+      window.setTimeout(() => {
+        terminalApiRef.current?.resize()
+        terminalApiRef.current?.focus()
+      }, 50)
+    }
+  }, [])
+
   const focusActivity = useCallback((activity) => {
     setActiveActivity(activity)
 
@@ -1715,14 +1727,15 @@ export default function App() {
     }
 
     if (activity === 'commands') {
-      setLayoutSizes((sizes) => ({ ...sizes, terminal: Math.max(sizes.terminal, 360) }))
+      setBottomPanelTab('commands')
+      setLayoutSizes((sizes) => ({ ...sizes, terminal: Math.max(sizes.terminal, 300) }))
       commandSearchRef.current?.focus({ preventScroll: true })
-      terminalApiRef.current?.focus()
       setOperationStatus('Command deck and terminal focused.')
       return
     }
 
-    setLayoutSizes((sizes) => ({ ...sizes, preview: Math.max(sizes.preview, 430) }))
+    setRightPanelTab('preview')
+    setLayoutSizes((sizes) => ({ ...sizes, preview: Math.max(sizes.preview, 560) }))
     previewPanelRef.current?.focus({ preventScroll: true })
     setOperationStatus('Preview focused.')
   }, [])
@@ -2269,7 +2282,29 @@ export default function App() {
           tabIndex={-1}
         >
           <div className="panel-title-row">
-            <span>Terminal</span>
+            <div className="bottom-tabs" role="tablist" aria-label="Bottom panel">
+              <button
+                className={bottomPanelTab === 'terminal' ? 'is-active' : ''}
+                type="button"
+                onClick={() => selectBottomPanelTab('terminal')}
+              >
+                Terminal
+              </button>
+              <button
+                className={bottomPanelTab === 'commands' ? 'is-active' : ''}
+                type="button"
+                onClick={() => selectBottomPanelTab('commands')}
+              >
+                Commands
+              </button>
+              <button
+                className={bottomPanelTab === 'problems' ? 'is-active' : ''}
+                type="button"
+                onClick={() => selectBottomPanelTab('problems')}
+              >
+                Problems
+              </button>
+            </div>
             <div className="terminal-actions">
               <span>{isInstalling ? 'Installing packages' : 'Interactive jsh'}</span>
               <button type="button" onClick={restartTerminal}>New</button>
@@ -2277,7 +2312,7 @@ export default function App() {
               <button type="button" onClick={killTerminal}>Kill</button>
             </div>
           </div>
-          <div className="command-shelf">
+          <div className={`command-shelf ${bottomPanelTab === 'commands' ? 'is-active' : ''}`}>
             <div className="command-header">
               <div>
                 <strong>Command Deck</strong>
@@ -2322,8 +2357,9 @@ export default function App() {
               Windows commands are mapped to WebContainer shell equivalents because the browser runtime is not native Windows.
             </div>
           </div>
-          {problems.length > 0 ? (
-            <div className="problems-panel">
+          <div className={`problems-panel ${bottomPanelTab === 'problems' ? 'is-active' : ''}`}>
+            {problems.length > 0 ? (
+              <>
               <div>
                 <strong>Problems</strong>
                 <button type="button" onClick={() => setProblems([])}>Clear</button>
@@ -2334,14 +2370,19 @@ export default function App() {
                   <code>{problem.message}</code>
                 </button>
               ))}
+              </>
+            ) : (
+              <p className="empty-panel-state">No problems captured yet.</p>
+            )}
             </div>
-          ) : null}
-          <TerminalPanel
-            key={terminalSessionKey}
-            webcontainer={webcontainer}
-            onReady={handleTerminalReady}
-            onOutput={inspectProcessOutput}
-          />
+          <div className={`terminal-tab-pane ${bottomPanelTab === 'terminal' ? 'is-active' : ''}`}>
+            <TerminalPanel
+              key={terminalSessionKey}
+              webcontainer={webcontainer}
+              onReady={handleTerminalReady}
+              onOutput={inspectProcessOutput}
+            />
+          </div>
         </section>
       </main>
 
@@ -2359,18 +2400,34 @@ export default function App() {
         tabIndex={-1}
       >
         <div className="preview-toolbar">
-          <div>
-            <strong>Preview</strong>
-            <span>{devStatus}</span>
+          <div className="right-panel-tabs" role="tablist" aria-label="Right panel">
+            <button
+              className={rightPanelTab === 'preview' ? 'is-active' : ''}
+              type="button"
+              onClick={() => setRightPanelTab('preview')}
+            >
+              Preview
+            </button>
+            <button
+              className={rightPanelTab === 'ai' ? 'is-active' : ''}
+              type="button"
+              onClick={() => setRightPanelTab('ai')}
+            >
+              AI Coder
+            </button>
           </div>
+          {rightPanelTab === 'preview' ? (
           <div className="preview-actions">
             <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
             <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
+          ) : (
+            <span className="right-panel-status">{aiUsageSummary.requestsLeft} req / {aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
+          )}
         </div>
-        <section className="ai-coder-panel">
+        <section className={`ai-coder-panel ${rightPanelTab === 'ai' ? 'is-active' : ''}`}>
           <div className="ai-header">
             <div>
               <strong>AI Coder</strong>
@@ -2485,7 +2542,7 @@ export default function App() {
             ) : null}
           </div>
         </section>
-        <div className="preview-frame-wrap">
+        <div className={`preview-frame-wrap ${rightPanelTab === 'preview' ? 'is-active' : ''}`}>
           {previewUrl ? (
             <iframe key={previewKey} title="WebContainer preview" src={previewUrl} />
           ) : (
