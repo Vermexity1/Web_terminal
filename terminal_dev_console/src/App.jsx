@@ -1512,6 +1512,52 @@ function StartScreen({ bootStatus, isImporting, onOpenFolder, onOpenFiles, onLoa
   )
 }
 
+function AiWorkingAnimation({ phase = 'thinking', steps = [] }) {
+  const isWriting = phase === 'writing'
+  const phaseSteps = steps.length
+    ? steps
+    : isWriting
+      ? ['Drafting edits', 'Checking diff safety', 'Preparing review']
+      : ['Reading context', 'Building plan', 'Reviewing risks']
+  const codeLines = isWriting
+    ? [
+        { text: '+ add guarded UI state', tone: 'add' },
+        { text: '+ render reviewable patch rows', tone: 'add' },
+        { text: '- avoid blind rewrites', tone: 'remove' },
+        { text: 'npm run build', tone: 'neutral' },
+      ]
+    : [
+        { text: 'scan(workspace.files)', tone: 'neutral' },
+        { text: 'rank(relevant.context)', tone: 'neutral' },
+        { text: 'plan(minimal.change)', tone: 'neutral' },
+      ]
+
+  return (
+    <div className={`ai-working-visual is-${phase}`} aria-hidden="true">
+      <div className="ai-thinking-stage">
+        <div className="ai-thinking-orbit">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="ai-thinking-core" />
+      </div>
+      <div className="ai-activity-steps">
+        {phaseSteps.map((step, index) => (
+          <span key={step} style={{ '--index': index }}>{step}</span>
+        ))}
+      </div>
+      <div className="ai-code-stream">
+        {codeLines.map((line, index) => (
+          <code className={`is-${line.tone}`} key={`${line.text}-${index}`} style={{ '--index': index }}>
+            {line.text}
+          </code>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [bootStatus, setBootStatus] = useState('Starting WebContainer...')
   const [webcontainer, setWebcontainer] = useState(null)
@@ -1560,6 +1606,7 @@ export default function App() {
   const [aiChangedPaths, setAiChangedPaths] = useState([])
   const [apiKeyStatus, setApiKeyStatus] = useState('')
   const [isAiRunning, setIsAiRunning] = useState(false)
+  const [aiRunPhase, setAiRunPhase] = useState('idle')
   const [bottomPanelTab, setBottomPanelTab] = useState('terminal')
   const [terminalSessionKey, setTerminalSessionKey] = useState(0)
   const [layoutSizes, setLayoutSizes] = useState({
@@ -2178,6 +2225,7 @@ export default function App() {
     }
 
     setIsAiRunning(true)
+    setAiRunPhase('thinking')
     setAiStatus(`${provider.label} is planning the change...`)
     setAiResult(null)
     setAiPlan(null)
@@ -2196,6 +2244,8 @@ export default function App() {
         role: 'assistant',
         content: `${provider.label} is using ${thinkingProfile.label} thinking: selecting context, planning target files, and drafting a safe plan before touching code...`,
         changes: [],
+        phase: 'thinking',
+        activitySteps: ['Selecting files', 'Building plan', 'Reviewing risk'],
         status: 'working',
       },
     ])
@@ -2257,6 +2307,7 @@ export default function App() {
       ])
     } finally {
       setIsAiRunning(false)
+      setAiRunPhase('idle')
     }
   }, [
     activeTab,
@@ -2318,6 +2369,7 @@ export default function App() {
     }
 
     setIsAiRunning(true)
+    setAiRunPhase('writing')
     setAiStatus(`${provider.label} is building the planned patch...`)
     setAiResult(null)
     setAiMessages((messages) => [
@@ -2327,6 +2379,8 @@ export default function App() {
         role: 'assistant',
         content: `${provider.label} is using ${thinkingProfile.label} thinking to apply the plan, validate paths, and prepare a reviewable patch...`,
         changes: [],
+        phase: 'writing',
+        activitySteps: ['Drafting edits', 'Validating paths', 'Preparing diff'],
         status: 'working',
       },
     ])
@@ -2397,6 +2451,7 @@ export default function App() {
       ])
     } finally {
       setIsAiRunning(false)
+      setAiRunPhase('idle')
     }
   }, [
     activeTab,
@@ -2839,7 +2894,7 @@ export default function App() {
   }, [activeTab, runTerminalCommand, saveActiveFile])
 
   const aiCoderPanel = (
-    <section className="ai-coder-panel left-ai-panel is-active">
+    <section className={`ai-coder-panel left-ai-panel is-active ${isAiRunning ? 'is-running' : ''} phase-${aiRunPhase}`}>
       <div className="ai-header">
         <div>
           <strong>AI Coder</strong>
@@ -2848,7 +2903,7 @@ export default function App() {
         <button type="button" onClick={resetAiUsage}>Reset Usage</button>
       </div>
 
-      <div className="ai-agent-strip">
+      <div className={`ai-agent-strip ${isAiRunning ? 'is-running' : ''} phase-${aiRunPhase}`}>
         <div>
           <strong>{aiUsageSummary.model.label}</strong>
           <span>
@@ -2856,6 +2911,13 @@ export default function App() {
             {' '}{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to plan' : 'API key needed in Settings'}
           </span>
         </div>
+        {isAiRunning ? (
+          <div className="ai-mini-activity" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        ) : null}
         <button type="button" onClick={() => setIsSettingsOpen(true)}>Settings</button>
       </div>
 
@@ -2867,8 +2929,14 @@ export default function App() {
 
       <div className="ai-chat-log" aria-live="polite">
         {aiMessages.map((message) => (
-          <article className={`ai-message is-${message.role} ${message.status ? `is-${message.status}` : ''}`} key={message.id}>
+          <article
+            className={`ai-message is-${message.role} ${message.status ? `is-${message.status}` : ''} ${message.phase ? `phase-${message.phase}` : ''}`}
+            key={message.id}
+          >
             <p>{message.content}</p>
+            {message.status === 'working' ? (
+              <AiWorkingAnimation phase={message.phase} steps={message.activitySteps} />
+            ) : null}
             {message.plan ? (
               <div className="ai-plan-block">
                 <strong>{message.plan.goal}</strong>
@@ -2896,8 +2964,14 @@ export default function App() {
             ) : null}
             {message.changes?.length ? (
               <div className="ai-change-list">
-                {message.changes.map((change) => (
-                  <button key={change.path} type="button" title={change.path} onClick={() => openFile(change.path)}>
+                {message.changes.map((change, index) => (
+                  <button
+                    key={change.path}
+                    type="button"
+                    title={change.path}
+                    style={{ '--index': index }}
+                    onClick={() => openFile(change.path)}
+                  >
                     <span>{change.path}</span>
                     <small>+{change.added} / -{change.removed} lines</small>
                   </button>
@@ -2953,10 +3027,10 @@ export default function App() {
         />
         <div className="ai-actions">
           <button type="submit" disabled={isAiRunning}>
-            {isAiRunning ? 'Thinking...' : 'Plan'}
+            {aiRunPhase === 'thinking' ? 'Thinking...' : 'Plan'}
           </button>
           <button type="button" disabled={isAiRunning || !aiPlan || aiPlan.questions?.length > 0} onClick={buildAiPlannedPatch}>
-            Build Plan
+            {aiRunPhase === 'writing' ? 'Writing...' : 'Build Plan'}
           </button>
           <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
             Apply Changes

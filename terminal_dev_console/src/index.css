@@ -1682,6 +1682,50 @@ button:disabled {
   font-size: 0.68rem;
 }
 
+.ai-agent-strip.is-running {
+  position: relative;
+  border-color: rgba(96, 165, 250, 0.42);
+  background:
+    linear-gradient(90deg, rgba(59, 130, 246, 0.14), transparent 48%, rgba(96, 165, 250, 0.12)),
+    rgba(5, 8, 12, 0.66);
+  overflow: hidden;
+}
+
+.ai-agent-strip.is-running::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(147, 197, 253, 0.14), transparent);
+  transform: translateX(-110%);
+  animation: aiPanelSweep 2.4s ease-in-out infinite;
+}
+
+.ai-mini-activity {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.ai-mini-activity span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #60a5fa;
+  box-shadow: 0 0 12px rgba(96, 165, 250, 0.72);
+  animation: aiMiniPulse 1s ease-in-out infinite;
+}
+
+.ai-mini-activity span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.ai-mini-activity span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
 .ai-actions {
   justify-content: flex-end;
 }
@@ -1703,11 +1747,13 @@ button:disabled {
 }
 
 .ai-message {
+  position: relative;
   max-width: 94%;
   padding: 8px;
   border: 1px solid rgba(87, 107, 132, 0.22);
   border-radius: 8px;
   background: rgba(10, 15, 24, 0.78);
+  overflow: hidden;
 }
 
 .ai-message.is-user {
@@ -1723,6 +1769,24 @@ button:disabled {
 .ai-message.is-working {
   color: #bfdbfe;
   border-color: rgba(96, 165, 250, 0.34);
+  background:
+    radial-gradient(circle at 14px 12px, rgba(96, 165, 250, 0.2), transparent 22px),
+    linear-gradient(180deg, rgba(15, 36, 66, 0.74), rgba(5, 8, 12, 0.82));
+  box-shadow: inset 2px 0 0 rgba(96, 165, 250, 0.74), 0 0 22px rgba(37, 99, 235, 0.12);
+}
+
+.ai-message.is-working::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(147, 197, 253, 0.12), transparent);
+  transform: translateX(-115%);
+  animation: aiPanelSweep 2.8s ease-in-out infinite;
+}
+
+.ai-message.is-working > * {
+  position: relative;
+  z-index: 1;
 }
 
 .ai-message.is-planned,
@@ -1757,6 +1821,129 @@ button:disabled {
   margin-top: 6px;
   color: #8fa0b3;
   font-size: 0.66rem;
+}
+
+.ai-working-visual {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: center;
+  margin-top: 9px;
+}
+
+.ai-thinking-stage {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  grid-row: span 2;
+}
+
+.ai-thinking-orbit {
+  position: absolute;
+  inset: 2px;
+  border: 1px solid rgba(96, 165, 250, 0.26);
+  border-radius: 50%;
+  animation: aiOrbit 2.8s linear infinite;
+}
+
+.ai-thinking-orbit span {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #60a5fa;
+  box-shadow: 0 0 14px rgba(96, 165, 250, 0.85);
+}
+
+.ai-thinking-orbit span:nth-child(1) {
+  top: -3px;
+  left: 13px;
+}
+
+.ai-thinking-orbit span:nth-child(2) {
+  right: 1px;
+  bottom: 4px;
+  opacity: 0.75;
+}
+
+.ai-thinking-orbit span:nth-child(3) {
+  bottom: 4px;
+  left: 1px;
+  opacity: 0.55;
+}
+
+.ai-thinking-core {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: #93c5fd;
+  box-shadow: 0 0 20px rgba(96, 165, 250, 0.72);
+  animation: aiCorePulse 1.45s ease-in-out infinite;
+}
+
+.ai-working-visual.is-writing .ai-thinking-orbit {
+  border-radius: 7px;
+  animation-duration: 1.9s;
+}
+
+.ai-working-visual.is-writing .ai-thinking-core {
+  border-radius: 4px;
+}
+
+.ai-activity-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ai-activity-steps span {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 999px;
+  color: #bfdbfe;
+  background: rgba(59, 130, 246, 0.12);
+  font-size: 0.62rem;
+  white-space: nowrap;
+  animation: aiStepGlow 2.4s ease-in-out infinite;
+  animation-delay: calc(var(--index) * 0.28s);
+}
+
+.ai-code-stream {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 7px;
+  border: 1px solid rgba(96, 165, 250, 0.14);
+  border-radius: 6px;
+  background:
+    linear-gradient(90deg, rgba(96, 165, 250, 0.08) 1px, transparent 1px) 0 0 / 12px 100%,
+    rgba(2, 6, 14, 0.68);
+}
+
+.ai-code-stream code {
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  color: #dbeafe;
+  font: 0.64rem/1.35 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  white-space: nowrap;
+  clip-path: inset(0 100% 0 0);
+  animation: aiCodeWrite 2.9s steps(28, end) infinite;
+  animation-delay: calc(var(--index) * 0.22s);
+}
+
+.ai-code-stream code.is-add {
+  color: #93c5fd;
+}
+
+.ai-code-stream code.is-remove {
+  color: #7dd3fc;
+}
+
+.ai-code-stream code.is-neutral {
+  color: #cbd5e1;
 }
 
 .ai-plan-block {
@@ -1832,6 +2019,13 @@ button:disabled {
   color: #dce8f8;
   background: rgba(5, 8, 12, 0.62);
   cursor: pointer;
+}
+
+.ai-message.is-proposed .ai-change-list button {
+  opacity: 0;
+  transform: translateY(6px);
+  animation: aiChangeReveal 0.46s ease forwards;
+  animation-delay: calc(var(--index) * 0.08s);
 }
 
 .ai-change-list button:hover {
@@ -1926,6 +2120,107 @@ button:disabled {
   font-size: 0.68rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@keyframes aiPanelSweep {
+  0% {
+    transform: translateX(-115%);
+  }
+
+  52%,
+  100% {
+    transform: translateX(115%);
+  }
+}
+
+@keyframes aiMiniPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.82);
+  }
+
+  45% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+@keyframes aiOrbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes aiCorePulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: scale(0.76);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes aiStepGlow {
+  0%,
+  100% {
+    border-color: rgba(96, 165, 250, 0.16);
+    opacity: 0.58;
+  }
+
+  45% {
+    border-color: rgba(147, 197, 253, 0.46);
+    opacity: 1;
+  }
+}
+
+@keyframes aiCodeWrite {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0.28;
+  }
+
+  38%,
+  78% {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
+
+  100% {
+    clip-path: inset(0 0 0 0);
+    opacity: 0.52;
+  }
+}
+
+@keyframes aiChangeReveal {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-agent-strip.is-running::before,
+  .ai-mini-activity span,
+  .ai-message.is-working::before,
+  .ai-thinking-orbit,
+  .ai-thinking-core,
+  .ai-activity-steps span,
+  .ai-code-stream code,
+  .ai-message.is-proposed .ai-change-list button {
+    animation: none;
+  }
+
+  .ai-code-stream code,
+  .ai-message.is-proposed .ai-change-list button {
+    clip-path: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .tab.is-ai-changed {
