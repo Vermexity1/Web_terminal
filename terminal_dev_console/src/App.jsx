@@ -536,6 +536,30 @@ function estimateAiCost(settings, inputTokens, outputTokens) {
   return (inputTokens / 1_000_000) * model.inputPrice + (outputTokens / 1_000_000) * model.outputPrice
 }
 
+function checkAiBudget(settings, usage, prompt, estimatedOutputTokens) {
+  const estimatedInputTokens = estimateTokens(prompt)
+  const estimatedCost = estimateAiCost(settings, estimatedInputTokens, estimatedOutputTokens)
+  const currentUsage = normalizeAiUsage(usage)
+  const currentTokens = currentUsage.inputTokens + currentUsage.outputTokens
+  const dailyRequestLimit = Number(settings.dailyRequestLimit) || 0
+  const dailyTokenLimit = Number(settings.dailyTokenLimit) || 0
+  const dailyBudgetUsd = Number(settings.dailyBudgetUsd) || 0
+
+  if (currentUsage.requests + 1 > dailyRequestLimit) {
+    return { blockedMessage: 'Blocked: your local daily AI request cap has been reached.' }
+  }
+
+  if (currentTokens + estimatedInputTokens + estimatedOutputTokens > dailyTokenLimit) {
+    return { blockedMessage: 'Blocked: this request would exceed your local daily token cap.' }
+  }
+
+  if (settings.priceMode !== 'free' && currentUsage.estimatedCostUsd + estimatedCost > dailyBudgetUsd) {
+    return { blockedMessage: 'Blocked: this request would exceed your local daily budget cap.' }
+  }
+
+  return { estimatedInputTokens, estimatedCost }
+}
+
 function diffLineStats(before, after) {
   const beforeLines = before ? String(before).replace(/\r\n/g, '\n').split('\n') : []
   const afterLines = after ? String(after).replace(/\r\n/g, '\n').split('\n') : []
@@ -605,13 +629,13 @@ function summarizeChangeSet(edits, existingContents = {}) {
   }
 }
 
-function buildAiPrompt({ userPrompt, activeTab, files, frameworkName, projectName }) {
+function buildAiPlanPrompt({ userPrompt, activeTab, files, frameworkName, projectName }) {
   const fileList = files.slice(0, 120).map((file) => file.path).join('\n')
   const activeFileBlock = activeTab
-    ? `Active file: ${activeTab.path}\n\n${activeTab.contents.slice(0, 24000)}`
+    ? `Active file: ${activeTab.path}\n\n${activeTab.contents.slice(0, 16000)}`
     : 'No active file is open.'
 
-  return `You are an AI coding assistant inside a browser IDE.
+  return `You are a careful coding agent inside a browser IDE. Your first job is to plan, not edit.
 Project: ${projectName}
 Framework: ${frameworkName}
 
@@ -626,7 +650,53 @@ ${userPrompt}
 Return ONLY valid JSON. Do not use markdown fences.
 Schema:
 {
-  "message": "brief explanation",
+  "message": "brief response to the user",
+  "goal": "one sentence goal",
+  "plan": ["ordered implementation step"],
+  "filesToRead": ["relative/file/path.ext"],
+  "filesToEdit": ["relative/file/path.ext"],
+  "commands": ["optional verification command"],
+  "risks": ["specific risk or edge case"],
+  "questions": ["blocking question if the request is unclear"]
+}
+
+Rules:
+- Do not write code yet.
+- Think like a real coding agent: understand intent, identify relevant files, plan a minimal change, and name verification steps.
+- Prefer existing project patterns and avoid unrelated rewrites.
+- If the request is ambiguous or unsafe, ask questions and leave filesToEdit empty.
+- Only list files that exist in the workspace unless you intentionally plan to create them.`
+}
+
+function buildAiPatchPrompt({ userPrompt, plan, activeTab, files, fileContents, frameworkName, projectName }) {
+  const fileList = files.slice(0, 160).map((file) => file.path).join('\n')
+  const contextBlock = Object.entries(fileContents || {})
+    .map(([path, contents]) => `--- ${path}\n${String(contents).slice(0, 28000)}`)
+    .join('\n\n')
+  const activeFileBlock = activeTab && !fileContents?.[activeTab.path]
+    ? `--- ${activeTab.path}\n${activeTab.contents.slice(0, 18000)}`
+    : ''
+
+  return `You are a careful coding agent inside a browser IDE. Build from the approved plan.
+Project: ${projectName}
+Framework: ${frameworkName}
+
+Workspace files:
+${fileList || '(empty workspace)'}
+
+User request:
+${userPrompt}
+
+Approved plan JSON:
+${JSON.stringify(plan, null, 2)}
+
+Relevant file contents:
+${contextBlock || activeFileBlock || '(No relevant file contents were available.)'}
+
+Return ONLY valid JSON. Do not use markdown fences.
+Schema:
+{
+  "message": "brief explanation of what changed",
   "edits": [
     { "path": "relative/file/path.ext", "content": "full replacement file content" }
   ],
@@ -636,7 +706,10 @@ Schema:
 Rules:
 - Use full file replacements only.
 - If you need to create a new file, include its full path and content.
-- Keep changes small and directly related to the request.
+- Follow the approved plan and keep changes small.
+- Preserve existing working WebContainer, terminal, editor, and preview logic unless the request directly targets them.
+- Do not invent unrelated files or replace the whole project.
+- If needed context is missing, return an empty edits array and explain what must be opened or provided.
 - If no edit is needed, return an empty edits array.`
 }
 
@@ -1275,16 +1348,20 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(true)
   const [autosaveEnabled, setAutosaveEnabled] = useState(() => localStorage.getItem('ide-autosave') !== 'false')
   const [theme, setTheme] = useState(() => localStorage.getItem('ide-theme') || 'blackblue')
+  const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('ide-layout-mode') || 'agentCode')
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [aiSettings, setAiSettings] = useState(() => normalizeAiSettings(readJsonStorage(aiSettingsStorageKey, {})))
   const [aiUsage, setAiUsage] = useState(() => normalizeAiUsage(readJsonStorage(aiUsageStorageKey, defaultAiUsage())))
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiResult, setAiResult] = useState(null)
+  const [aiPlan, setAiPlan] = useState(null)
+  const [aiLastRequest, setAiLastRequest] = useState('')
   const [aiStatus, setAiStatus] = useState('Save an AI provider key, set caps, then ask for a code change.')
   const [aiMessages, setAiMessages] = useState([
     {
       id: 'ai-welcome',
       role: 'assistant',
-      content: 'Ask me for a code change. I will inspect the open workspace, propose edits, and show exactly which files and lines change before you apply them.',
+      content: 'Ask me for a code change. I will plan first, list the files I intend to touch, then build a reviewable patch with line counts before you apply it.',
       changes: [],
       status: 'ready',
     },
@@ -1534,6 +1611,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('ide-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem('ide-layout-mode', layoutMode)
+  }, [layoutMode])
 
   useEffect(() => {
     setAiSettings((settings) => ({
@@ -1855,56 +1936,57 @@ export default function App() {
     return contents
   }, [tabs, webcontainer])
 
-  const runAiCoder = useCallback(async () => {
+  const recordAiUsage = useCallback((inputTokens, outputTokens, estimatedCostUsd) => {
+    setAiUsage((current) => {
+      const normalized = normalizeAiUsage(current)
+      return {
+        ...normalized,
+        requests: normalized.requests + 1,
+        inputTokens: normalized.inputTokens + inputTokens,
+        outputTokens: normalized.outputTokens + outputTokens,
+        estimatedCostUsd: normalized.estimatedCostUsd + estimatedCostUsd,
+      }
+    })
+  }, [])
+
+  const runAiPlan = useCallback(async () => {
     const provider = getAiProvider(aiSettings.provider)
     const apiKey = aiSettings.apiKeys?.[aiSettings.provider]?.trim()
     const request = aiPrompt.trim()
 
     if (!apiKey) {
-      setAiStatus(`Save a ${provider.label} API key first.`)
+      setAiStatus(`Open Settings and save a ${provider.label} API key first.`)
+      setIsSettingsOpen(true)
       return
     }
 
     if (!request) {
-      setAiStatus('Describe what you want the AI coder to change.')
+      setAiStatus('Describe what you want the AI coder to plan.')
       return
     }
 
     const files = flattenTree(tree)
-    const prompt = buildAiPrompt({
+    const prompt = buildAiPlanPrompt({
       userPrompt: request,
       activeTab,
       files,
       frameworkName,
       projectName,
     })
-    const estimatedInputTokens = estimateTokens(prompt)
-    const estimatedOutputTokens = Number(aiSettings.maxOutputTokens) || 1400
-    const estimatedCost = estimateAiCost(aiSettings, estimatedInputTokens, estimatedOutputTokens)
-    const currentUsage = normalizeAiUsage(aiUsage)
-    const currentTokens = currentUsage.inputTokens + currentUsage.outputTokens
-    const dailyRequestLimit = Number(aiSettings.dailyRequestLimit) || 0
-    const dailyTokenLimit = Number(aiSettings.dailyTokenLimit) || 0
-    const dailyBudgetUsd = Number(aiSettings.dailyBudgetUsd) || 0
+    const estimatedOutputTokens = Math.min(Number(aiSettings.maxOutputTokens) || 1400, 1200)
+    const budget = checkAiBudget(aiSettings, aiUsage, prompt, estimatedOutputTokens)
 
-    if (currentUsage.requests + 1 > dailyRequestLimit) {
-      setAiStatus('Blocked: your local daily AI request cap has been reached.')
-      return
-    }
-
-    if (currentTokens + estimatedInputTokens + estimatedOutputTokens > dailyTokenLimit) {
-      setAiStatus('Blocked: this request would exceed your local daily token cap.')
-      return
-    }
-
-    if (aiSettings.priceMode !== 'free' && currentUsage.estimatedCostUsd + estimatedCost > dailyBudgetUsd) {
-      setAiStatus('Blocked: this request would exceed your local daily budget cap.')
+    if (budget.blockedMessage) {
+      setAiStatus(budget.blockedMessage)
       return
     }
 
     setIsAiRunning(true)
-    setAiStatus(`Asking ${provider.label} for a patch...`)
+    setAiStatus(`${provider.label} is planning the change...`)
     setAiResult(null)
+    setAiPlan(null)
+    setAiChangedPaths([])
+    setAiLastRequest(request)
     const userMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -1916,7 +1998,7 @@ export default function App() {
       {
         id: `assistant-working-${Date.now()}`,
         role: 'assistant',
-        content: `${provider.label} is reading the workspace and preparing a patch...`,
+        content: `${provider.label} is thinking through the request, reading the visible workspace context, and drafting a plan before touching code...`,
         changes: [],
         status: 'working',
       },
@@ -1926,58 +2008,47 @@ export default function App() {
       const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
       const text = response.text
       const parsed = parseAiJson(text)
-      const edits = Array.isArray(parsed.edits) ? parsed.edits : []
-      const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
-      const changeSet = summarizeChangeSet(edits, existingContents)
-      const actualInputTokens = response.inputTokens || estimatedInputTokens
+      const plan = {
+        message: parsed.message || `${provider.label} created a plan.`,
+        goal: parsed.goal || request,
+        plan: Array.isArray(parsed.plan) ? parsed.plan : [],
+        filesToRead: Array.isArray(parsed.filesToRead) ? parsed.filesToRead.map(normalizePath).filter(Boolean) : [],
+        filesToEdit: Array.isArray(parsed.filesToEdit) ? parsed.filesToEdit.map(normalizePath).filter(Boolean) : [],
+        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+        risks: Array.isArray(parsed.risks) ? parsed.risks : [],
+        questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+      }
+      const actualInputTokens = response.inputTokens || budget.estimatedInputTokens
       const actualOutputTokens =
         response.outputTokens ||
         Math.max(estimateTokens(text), response.totalTokens ? response.totalTokens - actualInputTokens : 1)
       const actualCost = estimateAiCost(aiSettings, actualInputTokens, actualOutputTokens)
 
-      setAiUsage((current) => {
-        const normalized = normalizeAiUsage(current)
-        return {
-          ...normalized,
-          requests: normalized.requests + 1,
-          inputTokens: normalized.inputTokens + actualInputTokens,
-          outputTokens: normalized.outputTokens + actualOutputTokens,
-          estimatedCostUsd: normalized.estimatedCostUsd + actualCost,
-        }
-      })
-      setAiResult({
-        message: parsed.message || `${provider.label} returned a proposed change.`,
-        edits,
-        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-        changeSet,
-        usage: {
-          inputTokens: actualInputTokens,
-          outputTokens: actualOutputTokens,
-          estimatedCostUsd: actualCost,
-        },
-      })
-      setAiChangedPaths(changeSet.changes.map((change) => change.path))
+      recordAiUsage(actualInputTokens, actualOutputTokens, actualCost)
+      setAiPlan(plan)
       setAiMessages((messages) => [
         ...messages.filter((message) => message.status !== 'working'),
         {
-          id: `assistant-${Date.now()}`,
+          id: `assistant-plan-${Date.now()}`,
           role: 'assistant',
-          content: parsed.message || `${provider.label} returned a proposed change.`,
-          changes: changeSet.changes,
-          commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+          content: plan.message,
+          plan,
+          commands: plan.commands,
           usage: {
             inputTokens: actualInputTokens,
             outputTokens: actualOutputTokens,
             estimatedCostUsd: actualCost,
           },
-          status: 'proposed',
+          status: plan.questions.length ? 'questions' : 'planned',
         },
       ])
       setAiPrompt('')
-      setAiStatus(`Ready: ${edits.length} file edit(s), +${changeSet.added} / -${changeSet.removed} lines proposed.`)
+      setAiStatus(plan.questions.length
+        ? 'Plan needs clarification before building.'
+        : `Plan ready: ${plan.plan.length} step(s), ${plan.filesToEdit.length} likely file(s).`)
     } catch (error) {
       setAiStatus(error.message)
-      addProblem('AI Coder', error.message)
+      addProblem('AI Plan', error.message)
       setAiMessages((messages) => [
         ...messages.filter((message) => message.status !== 'working'),
         {
@@ -1999,7 +2070,138 @@ export default function App() {
     aiUsage,
     frameworkName,
     projectName,
+    recordAiUsage,
+    tree,
+  ])
+
+  const buildAiPlannedPatch = useCallback(async () => {
+    if (!aiPlan || !aiLastRequest) {
+      setAiStatus('Ask the AI coder to create a plan first.')
+      return
+    }
+
+    if (aiPlan.questions?.length) {
+      setAiStatus('Answer the plan questions before building.')
+      return
+    }
+
+    const provider = getAiProvider(aiSettings.provider)
+    const apiKey = aiSettings.apiKeys?.[aiSettings.provider]?.trim()
+
+    if (!apiKey) {
+      setAiStatus(`Open Settings and save a ${provider.label} API key first.`)
+      setIsSettingsOpen(true)
+      return
+    }
+
+    const files = flattenTree(tree)
+    const contextPaths = Array.from(new Set([
+      ...(aiPlan.filesToRead || []),
+      ...(aiPlan.filesToEdit || []),
+      activeTab?.path || '',
+    ].map(normalizePath).filter(Boolean)))
+    const fileContents = await readCurrentFileContents(contextPaths)
+    const prompt = buildAiPatchPrompt({
+      userPrompt: aiLastRequest,
+      plan: aiPlan,
+      activeTab,
+      files,
+      fileContents,
+      frameworkName,
+      projectName,
+    })
+    const estimatedOutputTokens = Number(aiSettings.maxOutputTokens) || 1400
+    const budget = checkAiBudget(aiSettings, aiUsage, prompt, estimatedOutputTokens)
+
+    if (budget.blockedMessage) {
+      setAiStatus(budget.blockedMessage)
+      return
+    }
+
+    setIsAiRunning(true)
+    setAiStatus(`${provider.label} is building the planned patch...`)
+    setAiResult(null)
+    setAiMessages((messages) => [
+      ...messages,
+      {
+        id: `assistant-working-${Date.now()}`,
+        role: 'assistant',
+        content: `${provider.label} is applying the plan to the relevant files and preparing a reviewable patch...`,
+        changes: [],
+        status: 'working',
+      },
+    ])
+
+    try {
+      const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
+      const text = response.text
+      const parsed = parseAiJson(text)
+      const edits = Array.isArray(parsed.edits) ? parsed.edits : []
+      const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
+      const changeSet = summarizeChangeSet(edits, existingContents)
+      const actualInputTokens = response.inputTokens || budget.estimatedInputTokens
+      const actualOutputTokens =
+        response.outputTokens ||
+        Math.max(estimateTokens(text), response.totalTokens ? response.totalTokens - actualInputTokens : 1)
+      const actualCost = estimateAiCost(aiSettings, actualInputTokens, actualOutputTokens)
+
+      recordAiUsage(actualInputTokens, actualOutputTokens, actualCost)
+      setAiResult({
+        message: parsed.message || `${provider.label} built a proposed patch.`,
+        edits,
+        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+        changeSet,
+        usage: {
+          inputTokens: actualInputTokens,
+          outputTokens: actualOutputTokens,
+          estimatedCostUsd: actualCost,
+        },
+      })
+      setAiChangedPaths(changeSet.changes.map((change) => change.path))
+      setAiMessages((messages) => [
+        ...messages.filter((message) => message.status !== 'working'),
+        {
+          id: `assistant-patch-${Date.now()}`,
+          role: 'assistant',
+          content: parsed.message || `${provider.label} built a proposed patch.`,
+          changes: changeSet.changes,
+          commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+          usage: {
+            inputTokens: actualInputTokens,
+            outputTokens: actualOutputTokens,
+            estimatedCostUsd: actualCost,
+          },
+          status: 'proposed',
+        },
+      ])
+      setAiStatus(`Ready: ${edits.length} file edit(s), +${changeSet.added} / -${changeSet.removed} lines proposed.`)
+    } catch (error) {
+      setAiStatus(error.message)
+      addProblem('AI Build', error.message)
+      setAiMessages((messages) => [
+        ...messages.filter((message) => message.status !== 'working'),
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          content: error.message,
+          changes: [],
+          status: 'error',
+        },
+      ])
+    } finally {
+      setIsAiRunning(false)
+    }
+  }, [
+    activeTab,
+    addProblem,
+    aiLastRequest,
+    aiPlan,
+    aiSettings,
+    aiUsage,
+    frameworkName,
+    projectName,
     readCurrentFileContents,
+    recordAiUsage,
     tree,
   ])
 
@@ -2102,8 +2304,10 @@ export default function App() {
 
   const focusActivity = useCallback((activity) => {
     setActiveActivity(activity)
+    setIsSettingsOpen(false)
 
     if (activity === 'explorer') {
+      setLayoutMode('agentCode')
       setLayoutSizes((sizes) => ({ ...sizes, explorer: Math.max(sizes.explorer, 250) }))
       explorerPanelRef.current?.focus({ preventScroll: true })
       setOperationStatus('AI coder and files focused.')
@@ -2111,6 +2315,7 @@ export default function App() {
     }
 
     if (activity === 'commands') {
+      setLayoutMode('agentCode')
       setBottomPanelTab('commands')
       setLayoutSizes((sizes) => ({ ...sizes, terminal: Math.max(sizes.terminal, 300) }))
       commandSearchRef.current?.focus({ preventScroll: true })
@@ -2118,6 +2323,7 @@ export default function App() {
       return
     }
 
+    setLayoutMode('codePreview')
     setLayoutSizes((sizes) => ({ ...sizes, preview: Math.max(sizes.preview, 560) }))
     previewPanelRef.current?.focus({ preventScroll: true })
     setOperationStatus('Preview focused.')
@@ -2415,117 +2621,12 @@ export default function App() {
         <button type="button" onClick={resetAiUsage}>Reset Usage</button>
       </div>
 
-      <div className="ai-settings-grid">
-        <label className="ai-wide">
-          Provider
-          <select
-            value={aiSettings.provider}
-            onChange={(event) => setAiSettings((settings) => ({
-              ...settings,
-              provider: event.target.value,
-              models: { ...defaultModelsByProvider, ...settings.models },
-            }))}
-          >
-            {aiProviders.map((provider) => (
-              <option key={provider.id} value={provider.id}>{provider.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="ai-wide">
-          API key
-          <input
-            type="password"
-            value={aiSettings.draftApiKey}
-            placeholder={aiUsageSummary.provider.keyPlaceholder}
-            autoComplete="off"
-            onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
-          />
-        </label>
-        <div className="ai-key-actions ai-wide">
-          <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
-          <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
-          <span>{apiKeyStatus || (aiSettings.apiKeys?.[aiSettings.provider] ? 'Saved in this browser.' : 'No key saved for this provider.')}</span>
+      <div className="ai-agent-strip">
+        <div>
+          <strong>{aiUsageSummary.model.label}</strong>
+          <span>{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to plan' : 'API key needed in Settings'}</span>
         </div>
-        {aiSettings.provider === 'custom' ? (
-          <>
-            <label className="ai-wide">
-              Endpoint
-              <input
-                type="url"
-                value={aiSettings.customEndpoint}
-                placeholder="https://api.example.com/v1/chat/completions"
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, customEndpoint: event.target.value }))}
-              />
-            </label>
-            <label>
-              Model
-              <input
-                type="text"
-                value={aiSettings.customModel}
-                placeholder="model-name"
-                onChange={(event) => setAiSettings((settings) => ({ ...settings, customModel: event.target.value }))}
-              />
-            </label>
-          </>
-        ) : (
-          <label>
-            Model
-            <select
-              value={aiSettings.models?.[aiSettings.provider] || aiUsageSummary.provider.models[0].id}
-              onChange={(event) => setAiSettings((settings) => ({
-                ...settings,
-                models: {
-                  ...defaultModelsByProvider,
-                  ...settings.models,
-                  [settings.provider]: event.target.value,
-                },
-              }))}
-            >
-              {aiUsageSummary.provider.models.map((model) => (
-                <option key={model.id} value={model.id}>{model.label}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label>
-          Mode
-          <select
-            value={aiSettings.priceMode}
-            onChange={(event) => setAiSettings((settings) => ({ ...settings, priceMode: event.target.value }))}
-          >
-            <option value="free">Free tier</option>
-            <option value="paid">Paid estimate</option>
-          </select>
-        </label>
-        <label>
-          Requests/day
-          <input
-            type="number"
-            min="1"
-            value={aiSettings.dailyRequestLimit}
-            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyRequestLimit: Number(event.target.value) }))}
-          />
-        </label>
-        <label>
-          Tokens/day
-          <input
-            type="number"
-            min="1000"
-            step="1000"
-            value={aiSettings.dailyTokenLimit}
-            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyTokenLimit: Number(event.target.value) }))}
-          />
-        </label>
-        <label>
-          Budget/day
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            value={aiSettings.dailyBudgetUsd}
-            onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyBudgetUsd: Number(event.target.value) }))}
-          />
-        </label>
+        <button type="button" onClick={() => setIsSettingsOpen(true)}>Settings</button>
       </div>
 
       <div className="ai-usage-bar">
@@ -2538,6 +2639,31 @@ export default function App() {
         {aiMessages.map((message) => (
           <article className={`ai-message is-${message.role} ${message.status ? `is-${message.status}` : ''}`} key={message.id}>
             <p>{message.content}</p>
+            {message.plan ? (
+              <div className="ai-plan-block">
+                <strong>{message.plan.goal}</strong>
+                {message.plan.plan?.length ? (
+                  <ol>
+                    {message.plan.plan.map((step, index) => (
+                      <li key={`${step}-${index}`}>{step}</li>
+                    ))}
+                  </ol>
+                ) : null}
+                {message.plan.filesToEdit?.length ? (
+                  <div className="ai-plan-files">
+                    {message.plan.filesToEdit.map((path) => (
+                      <button key={path} type="button" onClick={() => openFile(path)}>{path}</button>
+                    ))}
+                  </div>
+                ) : null}
+                {message.plan.risks?.length ? (
+                  <small>Risks: {message.plan.risks.join('; ')}</small>
+                ) : null}
+                {message.plan.questions?.length ? (
+                  <small>Questions: {message.plan.questions.join('; ')}</small>
+                ) : null}
+              </div>
+            ) : null}
             {message.changes?.length ? (
               <div className="ai-change-list">
                 {message.changes.map((change) => (
@@ -2580,7 +2706,7 @@ export default function App() {
         className="ai-compose"
         onSubmit={(event) => {
           event.preventDefault()
-          runAiCoder()
+          runAiPlan()
         }}
       >
         <textarea
@@ -2590,7 +2716,10 @@ export default function App() {
         />
         <div className="ai-actions">
           <button type="submit" disabled={isAiRunning}>
-            {isAiRunning ? 'Thinking...' : 'Ask AI'}
+            {isAiRunning ? 'Thinking...' : 'Plan'}
+          </button>
+          <button type="button" disabled={isAiRunning || !aiPlan || aiPlan.questions?.length > 0} onClick={buildAiPlannedPatch}>
+            Build Plan
           </button>
           <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
             Apply Changes
@@ -2604,9 +2733,179 @@ export default function App() {
     </section>
   )
 
+  const settingsPage = (
+    <section className="settings-page" aria-label="Settings">
+      <div className="settings-header">
+        <div>
+          <strong>Settings</strong>
+          <span>AI keys, model provider, usage caps, and workspace preferences.</span>
+        </div>
+        <button type="button" onClick={() => setIsSettingsOpen(false)}>Close</button>
+      </div>
+
+      <div className="settings-grid">
+        <section className="settings-section">
+          <h2>AI Provider</h2>
+          <div className="ai-settings-grid">
+            <label className="ai-wide">
+              Provider
+              <select
+                value={aiSettings.provider}
+                onChange={(event) => setAiSettings((settings) => ({
+                  ...settings,
+                  provider: event.target.value,
+                  models: { ...defaultModelsByProvider, ...settings.models },
+                }))}
+              >
+                {aiProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>{provider.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="ai-wide">
+              API key
+              <input
+                type="password"
+                value={aiSettings.draftApiKey}
+                placeholder={aiUsageSummary.provider.keyPlaceholder}
+                autoComplete="off"
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
+              />
+            </label>
+            <div className="ai-key-actions ai-wide">
+              <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
+              <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
+              <span>{apiKeyStatus || (aiSettings.apiKeys?.[aiSettings.provider] ? 'Saved in this browser.' : 'No key saved for this provider.')}</span>
+            </div>
+            {aiSettings.provider === 'custom' ? (
+              <>
+                <label className="ai-wide">
+                  Endpoint
+                  <input
+                    type="url"
+                    value={aiSettings.customEndpoint}
+                    placeholder="https://api.example.com/v1/chat/completions"
+                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customEndpoint: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Model
+                  <input
+                    type="text"
+                    value={aiSettings.customModel}
+                    placeholder="model-name"
+                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customModel: event.target.value }))}
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                Model
+                <select
+                  value={aiSettings.models?.[aiSettings.provider] || aiUsageSummary.provider.models[0].id}
+                  onChange={(event) => setAiSettings((settings) => ({
+                    ...settings,
+                    models: {
+                      ...defaultModelsByProvider,
+                      ...settings.models,
+                      [settings.provider]: event.target.value,
+                    },
+                  }))}
+                >
+                  {aiUsageSummary.provider.models.map((model) => (
+                    <option key={model.id} value={model.id}>{model.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label>
+              Mode
+              <select
+                value={aiSettings.priceMode}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, priceMode: event.target.value }))}
+              >
+                <option value="free">Free tier</option>
+                <option value="paid">Paid estimate</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h2>Usage Guardrails</h2>
+          <div className="ai-settings-grid">
+            <label>
+              Requests/day
+              <input
+                type="number"
+                min="1"
+                value={aiSettings.dailyRequestLimit}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyRequestLimit: Number(event.target.value) }))}
+              />
+            </label>
+            <label>
+              Tokens/day
+              <input
+                type="number"
+                min="1000"
+                step="1000"
+                value={aiSettings.dailyTokenLimit}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyTokenLimit: Number(event.target.value) }))}
+              />
+            </label>
+            <label>
+              Budget/day
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={aiSettings.dailyBudgetUsd}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, dailyBudgetUsd: Number(event.target.value) }))}
+              />
+            </label>
+            <label>
+              Max output tokens
+              <input
+                type="number"
+                min="256"
+                step="128"
+                value={aiSettings.maxOutputTokens}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, maxOutputTokens: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+          <div className="ai-usage-bar settings-usage">
+            <span>{aiUsageSummary.requestsLeft} req left</span>
+            <span>{aiUsageSummary.tokensLeft.toLocaleString()} tokens left</span>
+            <span>${aiUsageSummary.estimatedCostUsd.toFixed(4)} spent</span>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h2>Workspace</h2>
+          <div className="settings-row">
+            <label className="toolbar-toggle">
+              <input
+                type="checkbox"
+                checked={autosaveEnabled}
+                onChange={(event) => setAutosaveEnabled(event.target.checked)}
+              />
+              Autosave open files
+            </label>
+            <select value={theme} onChange={(event) => setTheme(event.target.value)} title="Theme">
+              {appThemes.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          </div>
+        </section>
+      </div>
+    </section>
+  )
+
   return (
     <div
-      className={`ide-shell theme-${theme} mobile-activity-${activeActivity}`}
+      className={`ide-shell theme-${theme} mobile-activity-${activeActivity} layout-${layoutMode} ${isSettingsOpen ? 'settings-open' : ''}`}
       ref={shellRef}
       style={{
         '--explorer-width': `${layoutSizes.explorer}px`,
@@ -2637,6 +2936,41 @@ export default function App() {
           <button type="button" onClick={() => runTerminalCommand('npm install')}>Install</button>
           <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Run Dev</button>
           <button type="button" onClick={() => startDevServer(undefined, 'start')}>Run Start</button>
+          <div className="view-switcher" role="group" aria-label="Visible sections">
+            <button
+              className={layoutMode === 'agentCode' && !isSettingsOpen ? 'is-active' : ''}
+              type="button"
+              onClick={() => {
+                setLayoutMode('agentCode')
+                setIsSettingsOpen(false)
+                setActiveActivity('explorer')
+              }}
+            >
+              AI+Code
+            </button>
+            <button
+              className={layoutMode === 'codePreview' && !isSettingsOpen ? 'is-active' : ''}
+              type="button"
+              onClick={() => {
+                setLayoutMode('codePreview')
+                setIsSettingsOpen(false)
+                setActiveActivity('preview')
+              }}
+            >
+              Code+Preview
+            </button>
+            <button
+              className={layoutMode === 'agentPreview' && !isSettingsOpen ? 'is-active' : ''}
+              type="button"
+              onClick={() => {
+                setLayoutMode('agentPreview')
+                setIsSettingsOpen(false)
+                setActiveActivity('preview')
+              }}
+            >
+              AI+Preview
+            </button>
+          </div>
           <label className="toolbar-toggle">
             <input
               type="checkbox"
@@ -2650,6 +2984,15 @@ export default function App() {
               <option key={item.id} value={item.id}>{item.label}</option>
             ))}
           </select>
+          <button
+            type="button"
+            className="settings-gear"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => setIsSettingsOpen((open) => !open)}
+          >
+            ⚙
+          </button>
         </div>
       </header>
 
@@ -2657,16 +3000,16 @@ export default function App() {
         <button
           className={`activity-dot ${activeActivity === 'explorer' ? 'is-active' : ''}`}
           type="button"
-          title="Focus Explorer"
+          title="Show AI and code"
           aria-pressed={activeActivity === 'explorer'}
           onClick={() => focusActivity('explorer')}
         >
-          EX
+          AI
         </button>
         <button
           className={`activity-dot ${activeActivity === 'commands' ? 'is-active' : ''}`}
           type="button"
-          title="Focus Commands and Terminal"
+          title="Show commands and terminal"
           aria-pressed={activeActivity === 'commands'}
           onClick={() => focusActivity('commands')}
         >
@@ -2675,13 +3018,15 @@ export default function App() {
         <button
           className={`activity-dot ${activeActivity === 'preview' ? 'is-active' : ''}`}
           type="button"
-          title="Focus Preview"
+          title="Show code and preview"
           aria-pressed={activeActivity === 'preview'}
           onClick={() => focusActivity('preview')}
         >
           PV
         </button>
       </aside>
+
+      {settingsPage}
 
       <aside
         className={`explorer-panel ${activeActivity === 'explorer' ? 'is-activity-active' : ''}`}
