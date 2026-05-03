@@ -10,6 +10,14 @@ const sessionMaxAgeSeconds = 60 * 60 * 24 * 14
 const localDataDir = path.join(process.cwd(), '.web-terminal-data')
 const localDataPath = path.join(localDataDir, 'store.json')
 
+function redisRestUrl() {
+  return process.env.UPSTASH_REDIS_REST_URL || process.env.STORAGE_KV_REST_API_URL
+}
+
+function redisRestToken() {
+  return process.env.UPSTASH_REDIS_REST_TOKEN || process.env.STORAGE_KV_REST_API_TOKEN
+}
+
 function emptyStore() {
   return {
     users: {},
@@ -20,14 +28,14 @@ function emptyStore() {
 }
 
 function isUpstashEnabled() {
-  return Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+  return Boolean(redisRestUrl() && redisRestToken())
 }
 
 async function upstashCommand(command) {
-  const response = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
+  const response = await fetch(redisRestUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`,
+      Authorization: `Bearer ${redisRestToken()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(command),
@@ -48,7 +56,7 @@ async function readLocalStore() {
 
 async function writeLocalStore(store) {
   if (process.env.VERCEL) {
-    throw new Error('Persistent storage is not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel.')
+    throw new Error('Persistent storage is not configured. Connect Upstash Redis or add STORAGE_KV_REST_API_URL and STORAGE_KV_REST_API_TOKEN in Vercel.')
   }
 
   await fs.mkdir(localDataDir, { recursive: true })
