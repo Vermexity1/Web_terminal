@@ -1091,6 +1091,89 @@ async function clearSavedSnapshot() {
   await withSnapshotStore('readwrite', (store) => databaseRequest(store.delete(currentSnapshotKey)))
 }
 
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || 'GET',
+    credentials: 'include',
+    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`)
+  return data
+}
+
+function cloudSafeAiSettings(settings = {}) {
+  return {
+    provider: settings.provider || 'gemini',
+    models: settings.models || {},
+    customEndpoint: settings.customEndpoint || '',
+    customModel: settings.customModel || '',
+    priceMode: settings.priceMode || 'free',
+    thinkingLevel: settings.thinkingLevel || 'deep',
+    dailyRequestLimit: Number(settings.dailyRequestLimit) || 20,
+    dailyTokenLimit: Number(settings.dailyTokenLimit) || 50000,
+    dailyBudgetUsd: Number(settings.dailyBudgetUsd) || 0,
+    maxOutputTokens: Number(settings.maxOutputTokens) || 3200,
+  }
+}
+
+function buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings }) {
+  return {
+    theme,
+    layoutMode,
+    autosaveEnabled,
+    aiSettings: cloudSafeAiSettings(aiSettings),
+  }
+}
+
+function uint8ToBase64(bytes) {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
+  }
+  return btoa(binary)
+}
+
+function base64ToUint8(base64) {
+  const binary = atob(base64 || '')
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes
+}
+
+function encodeCloudFile(file) {
+  const path = normalizePath(file.path)
+  if (typeof file.data === 'string') {
+    return { path, data: file.data, encoding: 'utf8' }
+  }
+
+  const bytes = file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data || [])
+  return { path, data: uint8ToBase64(bytes), encoding: 'base64' }
+}
+
+function decodeCloudFile(file) {
+  return {
+    path: normalizePath(file.path),
+    data: file.encoding === 'base64' ? base64ToUint8(file.data) : String(file.data || ''),
+  }
+}
+
+function filesForApi(files = []) {
+  return files.map(encodeCloudFile).filter((file) => file.path)
+}
+
+function projectFromApi(project) {
+  if (!project) return project
+  return {
+    ...project,
+    files: Array.isArray(project.files) ? project.files.map(decodeCloudFile) : [],
+  }
+}
+
 function flattenTree(nodes) {
   return nodes.flatMap((node) => (node.type === 'directory' ? flattenTree(node.children || []) : [node]))
 }
@@ -1561,6 +1644,125 @@ function AiWorkingAnimation({ phase = 'thinking', steps = [] }) {
   )
 }
 
+function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit }) {
+  const isSignup = mode === 'signup'
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-visual" aria-hidden="true">
+        <div className="auth-grid" />
+        <div className="auth-terminal-card">
+          <span>browser-terminal</span>
+          <strong>Run projects in the browser.</strong>
+          <code>$ npm run dev</code>
+          <code>$ ask agent "build this"</code>
+        </div>
+      </section>
+      <section className="auth-panel" aria-label={isSignup ? 'Create account' : 'Sign in'}>
+        <div className="auth-brand">
+          <span className="brand-mark" aria-hidden="true">
+            <span />
+            <span />
+          </span>
+          <div>
+            <strong>Web Terminal</strong>
+            <small>Sign in to save projects and settings.</small>
+          </div>
+        </div>
+        <div className="auth-tabs" role="tablist" aria-label="Authentication mode">
+          <button type="button" className={!isSignup ? 'is-active' : ''} onClick={() => onModeChange('signin')}>
+            Sign In
+          </button>
+          <button type="button" className={isSignup ? 'is-active' : ''} onClick={() => onModeChange('signup')}>
+            Sign Up
+          </button>
+        </div>
+        <form className="auth-form" onSubmit={onSubmit}>
+          {isSignup ? (
+            <label>
+              Name
+              <input
+                value={form.name}
+                autoComplete="name"
+                placeholder="Your name"
+                onChange={(event) => onFormChange({ ...form, name: event.target.value })}
+              />
+            </label>
+          ) : null}
+          <label>
+            Email
+            <input
+              type="email"
+              value={form.email}
+              autoComplete="email"
+              placeholder="you@example.com"
+              onChange={(event) => onFormChange({ ...form, email: event.target.value })}
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={form.password}
+              autoComplete={isSignup ? 'new-password' : 'current-password'}
+              placeholder="At least 8 characters"
+              onChange={(event) => onFormChange({ ...form, password: event.target.value })}
+            />
+          </label>
+          <button type="submit" className="primary-action">
+            {isSignup ? 'Create Account' : 'Sign In'}
+          </button>
+        </form>
+        {error ? <p className="auth-error">{error}</p> : null}
+        {status ? <p className="auth-status">{status}</p> : null}
+      </section>
+    </main>
+  )
+}
+
+function ProjectHub({ user, projects, newProjectName, status, onProjectNameChange, onCreateProject, onOpenProject, onSignOut }) {
+  return (
+    <main className="project-shell">
+      <section className="project-header">
+        <div>
+          <span>Signed in as {user.email}</span>
+          <h1>Create or open a project.</h1>
+          <p>Your files, project list, and non-secret settings are saved through the backend.</p>
+        </div>
+        <button type="button" onClick={onSignOut}>Sign Out</button>
+      </section>
+      <section className="project-create">
+        <label>
+          Project name
+          <input
+            value={newProjectName}
+            placeholder="My Browser Project"
+            onChange={(event) => onProjectNameChange(event.target.value)}
+          />
+        </label>
+        <button type="button" className="primary-action" onClick={onCreateProject}>
+          Create Project
+        </button>
+      </section>
+      <section className="project-list" aria-label="Saved projects">
+        <div className="project-list-heading">
+          <strong>Saved Projects</strong>
+          <span>{projects.length} total</span>
+        </div>
+        {projects.length ? projects.map((project) => (
+          <button type="button" key={project.id} onClick={() => onOpenProject(project.id)}>
+            <span>{project.name}</span>
+            <small>{project.fileCount || 0} files saved</small>
+          </button>
+        )) : (
+          <p>No projects yet. Create one to enter the IDE.</p>
+        )}
+      </section>
+      {status ? <p className="project-status">{status}</p> : null}
+    </main>
+  )
+}
+
 export default function App() {
   const [bootStatus, setBootStatus] = useState('Starting WebContainer...')
   const [webcontainer, setWebcontainer] = useState(null)
@@ -1592,6 +1794,16 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [aiSettings, setAiSettings] = useState(() => normalizeAiSettings(readJsonStorage(aiSettingsStorageKey, {})))
   const [aiUsage, setAiUsage] = useState(() => normalizeAiUsage(readJsonStorage(aiUsageStorageKey, defaultAiUsage())))
+  const [authLoading, setAuthLoading] = useState(true)
+  const [currentUser, setCurrentUser] = useState(null)
+  const [authMode, setAuthMode] = useState('signin')
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' })
+  const [authError, setAuthError] = useState('')
+  const [authStatus, setAuthStatus] = useState('')
+  const [cloudProjects, setCloudProjects] = useState([])
+  const [activeCloudProject, setActiveCloudProject] = useState(null)
+  const [newProjectName, setNewProjectName] = useState('New Browser Project')
+  const [projectHubStatus, setProjectHubStatus] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiResult, setAiResult] = useState(null)
   const [aiPlan, setAiPlan] = useState(null)
@@ -1632,6 +1844,9 @@ export default function App() {
   const previewPanelRef = useRef(null)
   const commandSearchRef = useRef(null)
   const saveSnapshotTimerRef = useRef(null)
+  const cloudSettingsTimerRef = useRef(null)
+  const activeCloudProjectRef = useRef(null)
+  const loadedCloudProjectIdRef = useRef('')
   const lastProblemRef = useRef('')
   const projectNameRef = useRef(projectName)
 
@@ -1669,6 +1884,87 @@ export default function App() {
     })
   }, [addProblem])
 
+  const applyCloudSettings = useCallback((settings = {}) => {
+    if (settings.theme) setTheme(settings.theme)
+    if (settings.layoutMode) setLayoutMode(settings.layoutMode)
+    if (typeof settings.autosaveEnabled === 'boolean') setAutosaveEnabled(settings.autosaveEnabled)
+    if (settings.aiSettings) {
+      setAiSettings((current) => normalizeAiSettings({
+        ...current,
+        ...settings.aiSettings,
+        apiKeys: current.apiKeys,
+        draftApiKey: current.draftApiKey,
+      }))
+    }
+  }, [])
+
+  const loadCloudProjects = useCallback(async () => {
+    const data = await apiRequest('/api/projects')
+    setCloudProjects(data.projects || [])
+    return data.projects || []
+  }, [])
+
+  const handleAuthSubmit = useCallback(async (event) => {
+    event.preventDefault()
+    setAuthError('')
+    setAuthStatus(authMode === 'signup' ? 'Creating account...' : 'Signing in...')
+
+    try {
+      const data = await apiRequest('/api/auth', {
+        method: 'POST',
+        body: {
+          action: authMode,
+          name: authForm.name,
+          email: authForm.email,
+          password: authForm.password,
+          settings: buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings }),
+        },
+      })
+      setCurrentUser(data.user)
+      applyCloudSettings(data.user?.settings || {})
+      await loadCloudProjects()
+      setAuthForm({ name: '', email: authForm.email, password: '' })
+      setAuthStatus('Choose a project to continue.')
+      setProjectHubStatus('')
+    } catch (error) {
+      setAuthError(error.message)
+      setAuthStatus('')
+    }
+  }, [
+    aiSettings,
+    applyCloudSettings,
+    authForm,
+    authMode,
+    autosaveEnabled,
+    layoutMode,
+    loadCloudProjects,
+    theme,
+  ])
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      await apiRequest('/api/auth', { method: 'POST', body: { action: 'signout' } })
+    } catch {
+      // Local session cleanup still happens below.
+    }
+    devProcessRef.current?.kill()
+    devProcessRef.current = null
+    setDevStatus('Stopped')
+    setCurrentUser(null)
+    setActiveCloudProject(null)
+    setCloudProjects([])
+    setProjectName('No folder opened')
+    setTree([])
+    setTabs([])
+    setActivePath('')
+    setSelectedPath('')
+    setProjectHubStatus('')
+    setAuthStatus('')
+    setAuthError('')
+    setAuthMode('signin')
+    setAuthForm({ name: '', email: '', password: '' })
+  }, [])
+
   const refreshExplorer = useCallback(async (container = webcontainer) => {
     if (!container) return
     const nextTree = await readExplorerTree(container)
@@ -1702,12 +1998,38 @@ export default function App() {
     saveSnapshotTimerRef.current = window.setTimeout(async () => {
       try {
         const files = await readWorkspaceFiles(container)
-        if (files.length === 0) return
+        const activeProject = activeCloudProjectRef.current
+        if (files.length === 0 && !activeProject?.id) return
         await saveSnapshot({
           name,
           files,
           savedAt: Date.now(),
         })
+        if (activeProject?.id) {
+          const data = await apiRequest('/api/projects', {
+            method: 'POST',
+            body: {
+              action: 'save',
+              id: activeProject.id,
+              name,
+              files: filesForApi(files),
+            },
+          })
+          const savedProject = projectFromApi(data.project)
+          setActiveCloudProject(savedProject)
+          setCloudProjects((projects) => {
+            const summary = {
+              id: savedProject.id,
+              name: savedProject.name,
+              fileCount: savedProject.files?.length || 0,
+              createdAt: savedProject.createdAt,
+              updatedAt: savedProject.updatedAt,
+              lastOpenedAt: savedProject.lastOpenedAt,
+            }
+            const rest = projects.filter((project) => project.id !== summary.id)
+            return [summary, ...rest]
+          })
+        }
         setHasSavedProject(true)
       } catch (error) {
         setOperationStatus(`Could not save browser snapshot: ${error.message}`)
@@ -1810,6 +2132,32 @@ export default function App() {
     setDevStatus('Stopped')
   }, [writeTerminal])
 
+  const returnToProjectHub = useCallback(async () => {
+    stopDevServer()
+    if (webcontainer && activeCloudProject?.id) {
+      try {
+        setProjectHubStatus('Saving project before switching...')
+        const files = await readWorkspaceFiles(webcontainer)
+        await apiRequest('/api/projects', {
+          method: 'POST',
+          body: {
+            action: 'save',
+            id: activeCloudProject.id,
+            name: projectNameRef.current,
+            files: filesForApi(files),
+          },
+        })
+        await loadCloudProjects()
+      } catch (error) {
+        setProjectHubStatus(`Project switch opened, but save failed: ${error.message}`)
+      }
+    }
+
+    loadedCloudProjectIdRef.current = ''
+    setActiveCloudProject(null)
+    setProjectHubStatus((status) => status || 'Choose a project to continue.')
+  }, [activeCloudProject, loadCloudProjects, stopDevServer, webcontainer])
+
   const saveActiveFile = useCallback(async () => {
     if (!webcontainer || !activeTab) return
     await webcontainer.fs.writeFile(activeTab.path, activeTab.contents)
@@ -1886,6 +2234,49 @@ export default function App() {
   }, [aiUsage])
 
   useEffect(() => {
+    activeCloudProjectRef.current = activeCloudProject
+  }, [activeCloudProject])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadSession() {
+      try {
+        const data = await apiRequest('/api/auth')
+        if (cancelled) return
+        setCurrentUser(data.user || null)
+        if (data.user?.settings) applyCloudSettings(data.user.settings)
+        if (data.user) await loadCloudProjects()
+      } catch {
+        if (!cancelled) setCurrentUser(null)
+      } finally {
+        if (!cancelled) setAuthLoading(false)
+      }
+    }
+
+    loadSession()
+    return () => {
+      cancelled = true
+    }
+  }, [applyCloudSettings, loadCloudProjects])
+
+  useEffect(() => {
+    if (!currentUser) return undefined
+
+    window.clearTimeout(cloudSettingsTimerRef.current)
+    cloudSettingsTimerRef.current = window.setTimeout(() => {
+      apiRequest('/api/settings', {
+        method: 'POST',
+        body: {
+          settings: buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings }),
+        },
+      }).catch((error) => setOperationStatus(`Could not save cloud settings: ${error.message}`))
+    }, 900)
+
+    return () => window.clearTimeout(cloudSettingsTimerRef.current)
+  }, [aiSettings, autosaveEnabled, currentUser, layoutMode, theme])
+
+  useEffect(() => {
     getSavedSnapshot().then((snapshot) => {
       setHasSavedProject(Boolean(snapshot?.files?.length))
     })
@@ -1894,6 +2285,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       window.clearTimeout(saveSnapshotTimerRef.current)
+      window.clearTimeout(cloudSettingsTimerRef.current)
     }
   }, [])
 
@@ -1926,6 +2318,7 @@ export default function App() {
       bootCleanupRef.current.unsubscribeError?.()
     }
 
+    if (authLoading || !currentUser || !activeCloudProject) return cleanupBoot
     if (bootStartedRef.current) return cleanupBoot
     bootStartedRef.current = true
 
@@ -1995,7 +2388,7 @@ export default function App() {
     boot()
 
     return cleanupBoot
-  }, [])
+  }, [activeCloudProject, authLoading, currentUser])
 
   const handleTerminalReady = useCallback(
     (api) => {
@@ -2961,7 +3354,7 @@ export default function App() {
 
   const importProjectFiles = useCallback(
     async (files, name = 'Imported Project', options = {}) => {
-      if (!webcontainer || files.length === 0) return
+      if (!webcontainer || (files.length === 0 && !options.allowEmpty)) return
 
       setIsImporting(true)
       setOperationStatus(`Importing ${files.length} files...`)
@@ -3017,6 +3410,64 @@ export default function App() {
     await importProjectFiles(snapshot.files, snapshot.name || 'Restored Project', { skipSnapshot: true })
     setOperationStatus(`Restored ${snapshot.name || 'saved project'} from browser storage.`)
   }, [importProjectFiles, tree.length, webcontainer])
+
+  const createCloudProject = useCallback(async () => {
+    const name = newProjectName.trim() || 'Untitled Project'
+    setProjectHubStatus('Creating project...')
+
+    try {
+      const data = await apiRequest('/api/projects', {
+        method: 'POST',
+        body: { action: 'create', name, files: [] },
+      })
+      const project = projectFromApi(data.project)
+      loadedCloudProjectIdRef.current = ''
+      setActiveCloudProject(project)
+      setCloudProjects((projects) => [
+        {
+          id: project.id,
+          name: project.name,
+          fileCount: project.files?.length || 0,
+          createdAt: project.createdAt,
+          updatedAt: project.updatedAt,
+          lastOpenedAt: project.lastOpenedAt,
+        },
+        ...projects.filter((item) => item.id !== project.id),
+      ])
+      setProjectName(project.name)
+      setProjectHubStatus('Project created. Starting workspace...')
+    } catch (error) {
+      setProjectHubStatus(error.message)
+    }
+  }, [newProjectName])
+
+  const openCloudProject = useCallback(async (projectId) => {
+    setProjectHubStatus('Opening project...')
+
+    try {
+      const data = await apiRequest(`/api/projects?id=${encodeURIComponent(projectId)}`)
+      const project = projectFromApi(data.project)
+      loadedCloudProjectIdRef.current = ''
+      setActiveCloudProject(project)
+      setProjectName(project.name)
+      setProjectHubStatus('Project opened. Starting workspace...')
+    } catch (error) {
+      setProjectHubStatus(error.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!webcontainer || !activeCloudProject || loadedCloudProjectIdRef.current === activeCloudProject.id) return
+
+    loadedCloudProjectIdRef.current = activeCloudProject.id
+    importProjectFiles(activeCloudProject.files || [], activeCloudProject.name || 'Cloud Project', {
+      skipSnapshot: true,
+      allowEmpty: true,
+    }).then(() => {
+      setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
+      setProjectHubStatus('')
+    })
+  }, [activeCloudProject, importProjectFiles, webcontainer])
 
   const openLocalFolder = useCallback(async () => {
     if (!webcontainer) return
@@ -3438,6 +3889,63 @@ export default function App() {
     </section>
   )
 
+  if (authLoading) {
+    return (
+      <main className="auth-shell auth-loading-shell">
+        <section className="auth-panel">
+          <div className="auth-brand">
+            <span className="brand-mark" aria-hidden="true">
+              <span />
+              <span />
+            </span>
+            <div>
+              <strong>Web Terminal</strong>
+              <small>Checking your session...</small>
+            </div>
+          </div>
+          <div className="auth-loader" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </section>
+      </main>
+    )
+  }
+
+  if (!currentUser) {
+    return (
+      <AuthScreen
+        mode={authMode}
+        form={authForm}
+        error={authError}
+        status={authStatus}
+        onModeChange={(nextMode) => {
+          setAuthMode(nextMode)
+          setAuthError('')
+          setAuthStatus('')
+        }}
+        onFormChange={setAuthForm}
+        onSubmit={handleAuthSubmit}
+      />
+    )
+  }
+
+  if (!activeCloudProject) {
+    return (
+      <ProjectHub
+        user={currentUser}
+        projects={cloudProjects}
+        newProjectName={newProjectName}
+        status={projectHubStatus}
+        onProjectNameChange={setNewProjectName}
+        onCreateProject={createCloudProject}
+        onOpenProject={openCloudProject}
+        onSignOut={handleSignOut}
+      />
+    )
+  }
+
   return (
     <div
       className={`ide-shell theme-${theme} mobile-activity-${activeActivity} layout-${layoutMode} ${isSettingsOpen ? 'settings-open' : ''}`}
@@ -3460,6 +3968,17 @@ export default function App() {
           </div>
         </div>
         <div className="top-actions">
+          <div className="session-chip" title={`${currentUser.email} - ${activeCloudProject.name}`}>
+            <span>{activeCloudProject.name}</span>
+            <small>{currentUser.email}</small>
+          </div>
+          <button
+            type="button"
+            onClick={returnToProjectHub}
+          >
+            Projects
+          </button>
+          <button type="button" onClick={handleSignOut}>Sign Out</button>
           <button type="button" className="primary-action" disabled={!webcontainer || isImporting || isInstalling} onClick={openLocalFolder}>
             {isImporting ? 'Importing...' : 'Open Folder'}
           </button>

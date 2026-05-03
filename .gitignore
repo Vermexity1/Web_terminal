@@ -3,7 +3,10 @@ dist/
 .vercel/
 .env
 .env.*
+!.env.example
+!terminal_dev_console/.env.example
 *.log
 terminal_dev_console/node_modules/
 terminal_dev_console/dist/
 terminal_dev_console/*.log
+terminal_dev_console/.web-terminal-data/
