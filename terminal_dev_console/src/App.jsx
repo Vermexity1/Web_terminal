@@ -1644,20 +1644,32 @@ function AiWorkingAnimation({ phase = 'thinking', steps = [] }) {
   )
 }
 
-function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit, onDemoAction }) {
+function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit }) {
   const isSignup = mode === 'signup'
+  const [demoStage, setDemoStage] = useState('idle')
+  const demoInstalled = demoStage === 'installed' || demoStage === 'built' || demoStage === 'running'
+  const demoBuilt = demoStage === 'built' || demoStage === 'running'
+  const demoRunning = demoStage === 'running'
+
+  const demoStatus = demoRunning
+    ? 'Running preview'
+    : demoBuilt
+      ? 'Build ready'
+      : demoInstalled
+        ? 'Installed'
+        : 'Waiting for install'
 
   return (
     <main className="auth-shell">
       <section className="auth-visual auth-demo-visual" aria-label="Demo project">
         <div className="auth-grid" />
-        <div className="auth-demo-workbench">
+        <div className={`auth-demo-workbench ${demoRunning ? 'is-running' : ''}`}>
           <div className="auth-demo-head">
             <div>
               <span>preinstalled test</span>
               <strong>Neon Runner Demo</strong>
             </div>
-            <code>Vite game</code>
+            <code>{demoStatus}</code>
           </div>
 
           <div className="auth-demo-code">
@@ -1676,9 +1688,20 @@ function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onS
           </div>
 
           <div className="auth-demo-actions" aria-label="Demo commands">
-            <button type="button" onClick={() => onDemoAction('install')}>Install</button>
-            <button type="button" onClick={() => onDemoAction('build')}>Run Build</button>
-            <button type="button" onClick={() => onDemoAction('start')}>Start</button>
+            <button type="button" className={demoInstalled ? 'is-complete' : ''} onClick={() => setDemoStage('installed')}>
+              Install
+            </button>
+            <button
+              type="button"
+              className={demoBuilt ? 'is-complete' : ''}
+              disabled={!demoInstalled}
+              onClick={() => setDemoStage('built')}
+            >
+              Run Build
+            </button>
+            <button type="button" disabled={!demoInstalled} onClick={() => setDemoStage('running')}>
+              Start
+            </button>
           </div>
 
           <div className="auth-demo-display" aria-label="Demo display preview">
@@ -1689,7 +1712,7 @@ function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onS
             </div>
             <div className="demo-game-hud">
               <span>NEON RUNNER</span>
-              <strong>00042</strong>
+              <strong>{demoRunning ? '00042' : 'READY'}</strong>
             </div>
             <span className="demo-runner" />
             <span className="demo-obstacle" />
@@ -1841,7 +1864,6 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState('')
   const [cloudProjects, setCloudProjects] = useState([])
   const [activeCloudProject, setActiveCloudProject] = useState(null)
-  const [isDemoSession, setIsDemoSession] = useState(false)
   const [newProjectName, setNewProjectName] = useState('New Browser Project')
   const [projectHubStatus, setProjectHubStatus] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
@@ -1887,8 +1909,6 @@ export default function App() {
   const cloudSettingsTimerRef = useRef(null)
   const activeCloudProjectRef = useRef(null)
   const loadedCloudProjectIdRef = useRef('')
-  const pendingDemoActionRef = useRef('')
-  const pendingTerminalCommandRef = useRef('')
   const lastProblemRef = useRef('')
   const projectNameRef = useRef(projectName)
 
@@ -1968,7 +1988,6 @@ export default function App() {
       setAuthForm({ name: '', email: authForm.email, password: '' })
       setAuthStatus('Choose a project to continue.')
       setProjectHubStatus('')
-      setIsDemoSession(false)
     } catch (error) {
       setAuthError(error.message)
       setAuthStatus('')
@@ -1983,39 +2002,6 @@ export default function App() {
     loadCloudProjects,
     theme,
   ])
-
-  const handleDemoAction = useCallback((action = 'start') => {
-    const now = Date.now()
-    const demoSettings = buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings })
-    const demoProject = {
-      id: `demo_${now}`,
-      name: 'Neon Runner Demo',
-      files: demoGameFiles,
-      isDemo: true,
-      createdAt: now,
-      updatedAt: now,
-      lastOpenedAt: now,
-    }
-
-    setAuthError('')
-    pendingDemoActionRef.current = action
-    setAuthStatus(`Loading Neon Runner demo for ${action === 'build' ? 'npm run build' : action === 'install' ? 'npm install' : 'npm start'}...`)
-    setIsDemoSession(true)
-    setCurrentUser({
-      id: 'demo_user',
-      email: 'demo@web-terminal.local',
-      name: 'Demo Guest',
-      settings: demoSettings,
-      createdAt: now,
-    })
-    setCloudProjects([])
-    loadedCloudProjectIdRef.current = ''
-    setActiveCloudProject(demoProject)
-    setProjectName(demoProject.name)
-    setProjectHubStatus('')
-    setAuthForm({ name: '', email: '', password: '' })
-    setOperationStatus('Loading the Neon Runner demo project...')
-  }, [aiSettings, autosaveEnabled, layoutMode, theme])
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -2039,7 +2025,6 @@ export default function App() {
     setAuthError('')
     setAuthMode('signin')
     setAuthForm({ name: '', email: '', password: '' })
-    setIsDemoSession(false)
   }, [])
 
   const refreshExplorer = useCallback(async (container = webcontainer) => {
@@ -2082,7 +2067,7 @@ export default function App() {
           files,
           savedAt: Date.now(),
         })
-        if (activeProject?.id && !activeProject.isDemo) {
+        if (activeProject?.id) {
           const data = await apiRequest('/api/projects', {
             method: 'POST',
             body: {
@@ -2211,11 +2196,6 @@ export default function App() {
 
   const returnToProjectHub = useCallback(async () => {
     stopDevServer()
-    if (isDemoSession || activeCloudProject?.isDemo) {
-      handleSignOut()
-      return
-    }
-
     if (webcontainer && activeCloudProject?.id) {
       try {
         setProjectHubStatus('Saving project before switching...')
@@ -2238,7 +2218,7 @@ export default function App() {
     loadedCloudProjectIdRef.current = ''
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
-  }, [activeCloudProject, handleSignOut, isDemoSession, loadCloudProjects, stopDevServer, webcontainer])
+  }, [activeCloudProject, loadCloudProjects, stopDevServer, webcontainer])
 
   const saveActiveFile = useCallback(async () => {
     if (!webcontainer || !activeTab) return
@@ -2327,14 +2307,10 @@ export default function App() {
         const data = await apiRequest('/api/auth')
         if (cancelled) return
         setCurrentUser(data.user || null)
-        setIsDemoSession(false)
         if (data.user?.settings) applyCloudSettings(data.user.settings)
         if (data.user) await loadCloudProjects()
       } catch {
-        if (!cancelled) {
-          setCurrentUser(null)
-          setIsDemoSession(false)
-        }
+        if (!cancelled) setCurrentUser(null)
       } finally {
         if (!cancelled) setAuthLoading(false)
       }
@@ -2347,7 +2323,7 @@ export default function App() {
   }, [applyCloudSettings, loadCloudProjects])
 
   useEffect(() => {
-    if (!currentUser || isDemoSession) return undefined
+    if (!currentUser) return undefined
 
     window.clearTimeout(cloudSettingsTimerRef.current)
     cloudSettingsTimerRef.current = window.setTimeout(() => {
@@ -2360,7 +2336,7 @@ export default function App() {
     }, 900)
 
     return () => window.clearTimeout(cloudSettingsTimerRef.current)
-  }, [aiSettings, autosaveEnabled, currentUser, isDemoSession, layoutMode, theme])
+  }, [aiSettings, autosaveEnabled, currentUser, layoutMode, theme])
 
   useEffect(() => {
     getSavedSnapshot().then((snapshot) => {
@@ -2482,12 +2458,6 @@ export default function App() {
       if (bufferedTerminalOutputRef.current) {
         api.write(bufferedTerminalOutputRef.current)
         bufferedTerminalOutputRef.current = ''
-      }
-      if (pendingTerminalCommandRef.current) {
-        const command = pendingTerminalCommandRef.current
-        pendingTerminalCommandRef.current = ''
-        api.run(command)
-        setOperationStatus(`Running: ${command}`)
       }
     },
     [],
@@ -3555,31 +3525,11 @@ export default function App() {
     importProjectFiles(activeCloudProject.files || [], activeCloudProject.name || 'Cloud Project', {
       skipSnapshot: true,
       allowEmpty: true,
-    }).then(async () => {
-      if (activeCloudProject.isDemo) {
-        await openFile('src/main.js', webcontainer)
-        const action = pendingDemoActionRef.current
-        const command = action === 'install'
-          ? 'npm install'
-          : action === 'build'
-            ? 'npm run build'
-            : 'npm start'
-        pendingDemoActionRef.current = ''
-        setActiveActivity('commands')
-        setBottomPanelTab('terminal')
-        if (terminalApiRef.current) {
-          terminalApiRef.current.run(command)
-          setOperationStatus(`Demo loaded. Running: ${command}`)
-        } else {
-          pendingTerminalCommandRef.current = command
-          setOperationStatus(`Demo loaded. Waiting for terminal to run: ${command}`)
-        }
-      } else {
-        setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
-      }
+    }).then(() => {
+      setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
       setProjectHubStatus('')
     })
-  }, [activeCloudProject, importProjectFiles, openFile, webcontainer])
+  }, [activeCloudProject, importProjectFiles, webcontainer])
 
   const openLocalFolder = useCallback(async () => {
     if (!webcontainer) return
@@ -4039,7 +3989,6 @@ export default function App() {
         }}
         onFormChange={setAuthForm}
         onSubmit={handleAuthSubmit}
-        onDemoAction={handleDemoAction}
       />
     )
   }
