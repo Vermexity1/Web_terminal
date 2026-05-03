@@ -840,6 +840,7 @@ Rules:
 - Prefer existing project patterns and avoid unrelated rewrites.
 - If the request is ambiguous or unsafe, ask questions and leave filesToEdit empty.
 - Only list files that exist in the workspace unless you intentionally plan to create them.
+- If the workspace is empty and the user asks for a project, game, page, or script, plan the files to create instead of asking them to open files first.
 - Include at least one verification command when the project has a package.json.
 - Be extra explicit because the patch step will follow this plan strictly.
 - For Deep or Max thinking, include likely edge cases and a short verification strategy.`
@@ -890,7 +891,9 @@ Rules:
 - Follow the approved plan and keep changes small.
 - Preserve existing working WebContainer, terminal, editor, and preview logic unless the request directly targets them.
 - Do not invent unrelated files or replace the whole project.
-- If needed context is missing, return an empty edits array and explain what must be opened or provided.
+- For normal code-changing requests, return concrete edits. Do not return an empty edits array when the plan names filesToEdit or when you can create the requested files.
+- If the workspace is empty and the request asks for a project, game, page, or script, create the necessary files from scratch.
+- If needed context is truly missing, return an empty edits array and explain what must be opened or provided.
 - Before returning, self-review for syntax errors, missing imports, broken state variables, and unrelated regressions.
 - If no edit is needed, return an empty edits array.`
 }
@@ -1598,7 +1601,7 @@ export default function App() {
     {
       id: 'ai-welcome',
       role: 'assistant',
-      content: 'Ask me for a code change. I will plan first, list the files I intend to touch, then build a reviewable patch with line counts before you apply it.',
+      content: 'Ask me for a code change. I will understand the request, plan the work, write the patch, apply it to the workspace, and show the files and line counts I changed.',
       changes: [],
       status: 'ready',
     },
@@ -2187,10 +2190,57 @@ export default function App() {
     })
   }, [])
 
+  const applyAiEditsToWorkspace = useCallback(async (edits) => {
+    if (!webcontainer) throw new Error('WebContainer is still starting. Try again once it is ready.')
+
+    const validEdits = (edits || [])
+      .map((edit) => ({ ...edit, path: normalizePath(edit.path || '') }))
+      .filter((edit) => edit.path && typeof edit.content === 'string')
+
+    if (!validEdits.length) return 0
+
+    for (const edit of validEdits) {
+      const dir = parentPath(edit.path)
+      if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
+      await webcontainer.fs.writeFile(edit.path, edit.content)
+    }
+
+    await refreshExplorer(webcontainer)
+    await detectProjectDetails(webcontainer)
+    await saveCurrentSnapshot(webcontainer)
+
+    const firstEdit = validEdits.find((edit) => edit.path)
+    if (firstEdit?.path) await openFile(firstEdit.path, webcontainer)
+
+    setPreviewKey((key) => key + 1)
+    return validEdits.length
+  }, [
+    detectProjectDetails,
+    openFile,
+    refreshExplorer,
+    saveCurrentSnapshot,
+    webcontainer,
+  ])
+
   const runAiPlan = useCallback(async () => {
     const provider = getAiProvider(aiSettings.provider)
     const apiKey = aiSettings.apiKeys?.[aiSettings.provider]?.trim()
     const request = aiPrompt.trim()
+    let runningUsage = normalizeAiUsage(aiUsage)
+
+    const trackAiUsage = (inputTokens, outputTokens, estimatedCostUsd) => {
+      const safeInput = Number(inputTokens) || 0
+      const safeOutput = Number(outputTokens) || 0
+      const safeCost = Number(estimatedCostUsd) || 0
+      recordAiUsage(safeInput, safeOutput, safeCost)
+      runningUsage = {
+        ...runningUsage,
+        requests: runningUsage.requests + 1,
+        inputTokens: runningUsage.inputTokens + safeInput,
+        outputTokens: runningUsage.outputTokens + safeOutput,
+        estimatedCostUsd: runningUsage.estimatedCostUsd + safeCost,
+      }
+    }
 
     if (!apiKey) {
       setAiStatus(`Open Settings and save a ${provider.label} API key first.`)
@@ -2216,8 +2266,8 @@ export default function App() {
       projectName,
       thinkingProfile,
     })
-    const estimatedOutputTokens = getAiOutputTokens(aiSettings, 'plan')
-    const budget = checkAiBudget(aiSettings, aiUsage, prompt, estimatedOutputTokens)
+    const planOutputTokens = getAiOutputTokens(aiSettings, 'plan')
+    const budget = checkAiBudget(aiSettings, runningUsage, prompt, planOutputTokens)
 
     if (budget.blockedMessage) {
       setAiStatus(budget.blockedMessage)
@@ -2251,7 +2301,7 @@ export default function App() {
     ])
 
     try {
-      const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
+      const response = await requestAiCoder(aiSettings, prompt, planOutputTokens)
       const text = response.text
       const parsed = parseAiJson(text)
       const plan = {
@@ -2270,7 +2320,7 @@ export default function App() {
         Math.max(estimateTokens(text), response.totalTokens ? response.totalTokens - actualInputTokens : 1)
       const actualCost = estimateAiCost(aiSettings, actualInputTokens, actualOutputTokens)
 
-      recordAiUsage(actualInputTokens, actualOutputTokens, actualCost)
+      trackAiUsage(actualInputTokens, actualOutputTokens, actualCost)
       setAiPlan(plan)
       setAiMessages((messages) => [
         ...messages.filter((message) => message.status !== 'working'),
@@ -2288,13 +2338,144 @@ export default function App() {
           status: plan.questions.length ? 'questions' : 'planned',
         },
       ])
-      setAiPrompt('')
       setAiStatus(plan.questions.length
-        ? 'Plan needs clarification before building.'
-        : `Plan ready: ${plan.plan.length} step(s), ${plan.filesToEdit.length} likely file(s).`)
+        ? 'Plan needs clarification before the agent can safely continue.'
+        : `Plan ready. Building ${plan.filesToEdit.length || 'the needed'} file edit(s) now...`)
+
+      if (plan.questions.length) return
+
+      setAiRunPhase('writing')
+      setAiStatus(`${provider.label} is writing and applying the planned changes...`)
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: `assistant-working-${Date.now()}`,
+          role: 'assistant',
+          content: `${provider.label} is following its plan now: generating edits, validating paths, and applying the patch to the workspace...`,
+          changes: [],
+          phase: 'writing',
+          activitySteps: ['Writing edits', 'Checking file paths', 'Applying patch'],
+          status: 'working',
+        },
+      ])
+
+      const patchContextPaths = Array.from(new Set([
+        ...contextPaths,
+        ...(plan.filesToRead || []),
+        ...(plan.filesToEdit || []),
+        activeTab?.path || '',
+      ].map(normalizePath).filter(Boolean)))
+      const patchFileContents = await readCurrentFileContents(patchContextPaths)
+      const patchPrompt = buildAiPatchPrompt({
+        userPrompt: request,
+        plan,
+        activeTab,
+        files,
+        fileContents: patchFileContents,
+        frameworkName,
+        projectName,
+        thinkingProfile,
+      })
+      const patchOutputTokens = getAiOutputTokens(aiSettings, 'patch')
+      const patchBudget = checkAiBudget(aiSettings, runningUsage, patchPrompt, patchOutputTokens)
+
+      if (patchBudget.blockedMessage) throw new Error(patchBudget.blockedMessage)
+
+      const patchResponse = await requestAiCoder(aiSettings, patchPrompt, patchOutputTokens)
+      const patchText = patchResponse.text
+      const patchParsed = parseAiJson(patchText)
+      const normalizedEdits = normalizeAiEdits(Array.isArray(patchParsed.edits) ? patchParsed.edits : [], plan, files, thinkingProfile)
+      const edits = normalizedEdits.edits
+      const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
+      const changeSet = summarizeChangeSet(edits, existingContents)
+      const patchInputTokens = patchResponse.inputTokens || patchBudget.estimatedInputTokens
+      const patchActualOutputTokens =
+        patchResponse.outputTokens ||
+        Math.max(estimateTokens(patchText), patchResponse.totalTokens ? patchResponse.totalTokens - patchInputTokens : 1)
+      const patchActualCost = estimateAiCost(aiSettings, patchInputTokens, patchActualOutputTokens)
+      const patchReview = [
+        ...(Array.isArray(patchParsed.changeSummary) ? patchParsed.changeSummary : []),
+        ...(Array.isArray(patchParsed.selfReview) ? patchParsed.selfReview : []),
+        ...normalizedEdits.rejected.map((item) => `Blocked ${item.path}: ${item.reason}`),
+      ]
+
+      trackAiUsage(patchInputTokens, patchActualOutputTokens, patchActualCost)
+
+      if (!edits.length) {
+        setAiResult({
+          message: patchParsed.message || `${provider.label} did not return any safe edits.`,
+          edits: [],
+          commands: Array.isArray(patchParsed.commands) ? patchParsed.commands : [],
+          changeSet,
+          applied: false,
+          usage: {
+            inputTokens: patchInputTokens,
+            outputTokens: patchActualOutputTokens,
+            estimatedCostUsd: patchActualCost,
+          },
+        })
+        setAiMessages((messages) => [
+          ...messages.filter((message) => message.status !== 'working'),
+          {
+            id: `assistant-no-edits-${Date.now()}`,
+            role: 'assistant',
+            content: normalizedEdits.rejected.length
+              ? `${patchParsed.message || `${provider.label} generated edits, but none were safe to apply.`} ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
+              : patchParsed.message || `${provider.label} did not return edits for this request.`,
+            changes: [],
+            commands: Array.isArray(patchParsed.commands) ? patchParsed.commands : [],
+            review: patchReview,
+            usage: {
+              inputTokens: patchInputTokens,
+              outputTokens: patchActualOutputTokens,
+              estimatedCostUsd: patchActualCost,
+            },
+            status: 'error',
+          },
+        ])
+        setAiStatus('No code was changed because the AI did not return safe edits.')
+        return
+      }
+
+      const appliedCount = await applyAiEditsToWorkspace(edits)
+      setAiResult({
+        message: patchParsed.message || `${provider.label} applied the planned patch.`,
+        edits,
+        commands: Array.isArray(patchParsed.commands) ? patchParsed.commands : [],
+        changeSet,
+        applied: true,
+        usage: {
+          inputTokens: patchInputTokens,
+          outputTokens: patchActualOutputTokens,
+          estimatedCostUsd: patchActualCost,
+        },
+      })
+      setAiChangedPaths(changeSet.changes.map((change) => change.path))
+      setAiMessages((messages) => [
+        ...messages.filter((message) => message.status !== 'working'),
+        {
+          id: `assistant-applied-${Date.now()}`,
+          role: 'assistant',
+          content: normalizedEdits.rejected.length
+            ? `${patchParsed.message || `${provider.label} applied the planned patch.`} Applied ${appliedCount} file edit(s). ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
+            : `${patchParsed.message || `${provider.label} applied the planned patch.`} Applied ${appliedCount} file edit(s) to the workspace.`,
+          changes: changeSet.changes,
+          commands: Array.isArray(patchParsed.commands) ? patchParsed.commands : [],
+          review: patchReview,
+          usage: {
+            inputTokens: patchInputTokens,
+            outputTokens: patchActualOutputTokens,
+            estimatedCostUsd: patchActualCost,
+          },
+          status: 'applied',
+        },
+      ])
+      setAiPrompt('')
+      setAiStatus(`Applied ${appliedCount} file edit(s), +${changeSet.added} / -${changeSet.removed} lines.`)
+      setOperationStatus(`AI applied ${appliedCount} file edit(s).`)
     } catch (error) {
       setAiStatus(error.message)
-      addProblem('AI Plan', error.message)
+      addProblem('AI Agent', error.message)
       setAiMessages((messages) => [
         ...messages.filter((message) => message.status !== 'working'),
         {
@@ -2315,6 +2496,7 @@ export default function App() {
     aiPrompt,
     aiSettings,
     aiUsage,
+    applyAiEditsToWorkspace,
     frameworkName,
     projectName,
     readCurrentFileContents,
@@ -2398,13 +2580,57 @@ export default function App() {
         response.outputTokens ||
         Math.max(estimateTokens(text), response.totalTokens ? response.totalTokens - actualInputTokens : 1)
       const actualCost = estimateAiCost(aiSettings, actualInputTokens, actualOutputTokens)
+      const review = [
+        ...(Array.isArray(parsed.changeSummary) ? parsed.changeSummary : []),
+        ...(Array.isArray(parsed.selfReview) ? parsed.selfReview : []),
+        ...normalizedEdits.rejected.map((item) => `Blocked ${item.path}: ${item.reason}`),
+      ]
 
       recordAiUsage(actualInputTokens, actualOutputTokens, actualCost)
+
+      if (!edits.length) {
+        setAiResult({
+          message: parsed.message || `${provider.label} did not return any safe edits.`,
+          edits: [],
+          commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+          changeSet,
+          applied: false,
+          usage: {
+            inputTokens: actualInputTokens,
+            outputTokens: actualOutputTokens,
+            estimatedCostUsd: actualCost,
+          },
+        })
+        setAiMessages((messages) => [
+          ...messages.filter((message) => message.status !== 'working'),
+          {
+            id: `assistant-no-edits-${Date.now()}`,
+            role: 'assistant',
+            content: normalizedEdits.rejected.length
+              ? `${parsed.message || `${provider.label} generated edits, but none were safe to apply.`} ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
+              : parsed.message || `${provider.label} did not return edits for this request.`,
+            changes: [],
+            commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+            review,
+            usage: {
+              inputTokens: actualInputTokens,
+              outputTokens: actualOutputTokens,
+              estimatedCostUsd: actualCost,
+            },
+            status: 'error',
+          },
+        ])
+        setAiStatus('No code was changed because the AI did not return safe edits.')
+        return
+      }
+
+      const appliedCount = await applyAiEditsToWorkspace(edits)
       setAiResult({
-        message: parsed.message || `${provider.label} built a proposed patch.`,
+        message: parsed.message || `${provider.label} applied the planned patch.`,
         edits,
         commands: Array.isArray(parsed.commands) ? parsed.commands : [],
         changeSet,
+        applied: true,
         usage: {
           inputTokens: actualInputTokens,
           outputTokens: actualOutputTokens,
@@ -2415,27 +2641,24 @@ export default function App() {
       setAiMessages((messages) => [
         ...messages.filter((message) => message.status !== 'working'),
         {
-          id: `assistant-patch-${Date.now()}`,
+          id: `assistant-applied-${Date.now()}`,
           role: 'assistant',
           content: normalizedEdits.rejected.length
-            ? `${parsed.message || `${provider.label} built a proposed patch.`} ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
-            : parsed.message || `${provider.label} built a proposed patch.`,
+            ? `${parsed.message || `${provider.label} applied the planned patch.`} Applied ${appliedCount} file edit(s). ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
+            : `${parsed.message || `${provider.label} applied the planned patch.`} Applied ${appliedCount} file edit(s) to the workspace.`,
           changes: changeSet.changes,
           commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-          review: [
-            ...(Array.isArray(parsed.changeSummary) ? parsed.changeSummary : []),
-            ...(Array.isArray(parsed.selfReview) ? parsed.selfReview : []),
-            ...normalizedEdits.rejected.map((item) => `Blocked ${item.path}: ${item.reason}`),
-          ],
+          review,
           usage: {
             inputTokens: actualInputTokens,
             outputTokens: actualOutputTokens,
             estimatedCostUsd: actualCost,
           },
-          status: 'proposed',
+          status: 'applied',
         },
       ])
-      setAiStatus(`Ready: ${edits.length} file edit(s), +${changeSet.added} / -${changeSet.removed} lines proposed.`)
+      setAiStatus(`Applied ${appliedCount} file edit(s), +${changeSet.added} / -${changeSet.removed} lines.`)
+      setOperationStatus(`AI applied ${appliedCount} file edit(s).`)
     } catch (error) {
       setAiStatus(error.message)
       addProblem('AI Build', error.message)
@@ -2460,6 +2683,7 @@ export default function App() {
     aiPlan,
     aiSettings,
     aiUsage,
+    applyAiEditsToWorkspace,
     frameworkName,
     projectName,
     readCurrentFileContents,
@@ -2468,27 +2692,13 @@ export default function App() {
   ])
 
   const applyAiEdits = useCallback(async () => {
-    if (!webcontainer || !aiResult?.edits?.length) return
+    if (!aiResult?.edits?.length || aiResult.applied) return
 
     try {
-      for (const edit of aiResult.edits) {
-        const path = normalizePath(edit.path || '')
-        if (!path || typeof edit.content !== 'string') continue
-        const dir = parentPath(path)
-        if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
-        await webcontainer.fs.writeFile(path, edit.content)
-      }
-
-      await refreshExplorer(webcontainer)
-      await detectProjectDetails(webcontainer)
-      await saveCurrentSnapshot(webcontainer)
-
-      const firstEdit = aiResult.edits.find((edit) => edit.path)
-      if (firstEdit?.path) await openFile(normalizePath(firstEdit.path), webcontainer)
-
-      setPreviewKey((key) => key + 1)
-      setAiStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
-      setOperationStatus(`Applied ${aiResult.edits.length} AI edit(s).`)
+      const appliedCount = await applyAiEditsToWorkspace(aiResult.edits)
+      setAiResult((result) => result ? { ...result, applied: true } : result)
+      setAiStatus(`Applied ${appliedCount} AI edit(s).`)
+      setOperationStatus(`Applied ${appliedCount} AI edit(s).`)
       setAiMessages((messages) => messages.map((message) => (
         message.status === 'proposed'
           ? { ...message, status: 'applied', content: `${message.content} Applied to the workspace.` }
@@ -2501,11 +2711,7 @@ export default function App() {
   }, [
     addProblem,
     aiResult,
-    detectProjectDetails,
-    openFile,
-    refreshExplorer,
-    saveCurrentSnapshot,
-    webcontainer,
+    applyAiEditsToWorkspace,
   ])
 
   const resetAiUsage = useCallback(() => {
@@ -2908,7 +3114,7 @@ export default function App() {
           <strong>{aiUsageSummary.model.label}</strong>
           <span>
             {getAiThinkingProfile(aiSettings.thinkingLevel).label} thinking /
-            {' '}{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to plan' : 'API key needed in Settings'}
+            {' '}{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to build' : 'API key needed in Settings'}
           </span>
         </div>
         {isAiRunning ? (
@@ -3022,18 +3228,18 @@ export default function App() {
       >
         <textarea
           value={aiPrompt}
-          placeholder="Tell the AI coder what to change..."
+          placeholder="Ask the AI agent to build or change something..."
           onChange={(event) => setAiPrompt(event.target.value)}
         />
         <div className="ai-actions">
           <button type="submit" disabled={isAiRunning}>
-            {aiRunPhase === 'thinking' ? 'Thinking...' : 'Plan'}
+            {aiRunPhase === 'thinking' ? 'Thinking...' : aiRunPhase === 'writing' ? 'Writing...' : 'Ask Agent'}
           </button>
           <button type="button" disabled={isAiRunning || !aiPlan || aiPlan.questions?.length > 0} onClick={buildAiPlannedPatch}>
-            {aiRunPhase === 'writing' ? 'Writing...' : 'Build Plan'}
+            {aiRunPhase === 'writing' ? 'Writing...' : 'Run Plan'}
           </button>
-          <button type="button" disabled={!aiResult?.edits?.length} onClick={applyAiEdits}>
-            Apply Changes
+          <button type="button" disabled={!aiResult?.edits?.length || aiResult.applied} onClick={applyAiEdits}>
+            {aiResult?.applied ? 'Applied' : 'Apply Changes'}
           </button>
         </div>
       </form>
