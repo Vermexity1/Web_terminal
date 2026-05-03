@@ -362,32 +362,74 @@ const appThemes = [
 
 const aiSettingsStorageKey = 'ide-ai-settings-v1'
 const aiUsageStorageKey = 'ide-ai-usage-v1'
-const geminiModels = [
+const aiProviders = [
   {
-    id: 'gemini-3.1-flash-lite-preview',
-    label: 'Gemini 3.1 Flash-Lite',
-    inputPrice: 0.25,
-    outputPrice: 1.5,
+    id: 'gemini',
+    label: 'Google Gemini',
+    keyPlaceholder: 'Gemini API key',
+    models: [
+      {
+        id: 'gemini-3.1-flash-lite-preview',
+        label: 'Gemini 3.1 Flash-Lite',
+        inputPrice: 0.25,
+        outputPrice: 1.5,
+      },
+      {
+        id: 'gemini-3-flash-preview',
+        label: 'Gemini 3 Flash',
+        inputPrice: 0.5,
+        outputPrice: 3,
+      },
+      {
+        id: 'gemini-2.5-flash-lite',
+        label: 'Gemini 2.5 Flash-Lite',
+        inputPrice: 0.1,
+        outputPrice: 0.4,
+      },
+      {
+        id: 'gemini-2.5-flash',
+        label: 'Gemini 2.5 Flash',
+        inputPrice: 0.3,
+        outputPrice: 2.5,
+      },
+    ],
   },
   {
-    id: 'gemini-3-flash-preview',
-    label: 'Gemini 3 Flash',
-    inputPrice: 0.5,
-    outputPrice: 3,
+    id: 'openai',
+    label: 'OpenAI',
+    keyPlaceholder: 'OpenAI API key',
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    models: [
+      { id: 'gpt-4o-mini', label: 'GPT-4o Mini', inputPrice: 0.15, outputPrice: 0.6 },
+      { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', inputPrice: 0.4, outputPrice: 1.6 },
+      { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', inputPrice: 0.1, outputPrice: 0.4 },
+    ],
   },
   {
-    id: 'gemini-2.5-flash-lite',
-    label: 'Gemini 2.5 Flash-Lite',
-    inputPrice: 0.1,
-    outputPrice: 0.4,
+    id: 'openrouter',
+    label: 'OpenRouter',
+    keyPlaceholder: 'OpenRouter API key',
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    models: [
+      { id: 'google/gemini-2.0-flash-exp:free', label: 'Gemini Flash Free', inputPrice: 0, outputPrice: 0 },
+      { id: 'meta-llama/llama-3.1-8b-instruct:free', label: 'Llama 3.1 8B Free', inputPrice: 0, outputPrice: 0 },
+      { id: 'openai/gpt-4o-mini', label: 'GPT-4o Mini', inputPrice: 0.15, outputPrice: 0.6 },
+    ],
   },
   {
-    id: 'gemini-2.5-flash',
-    label: 'Gemini 2.5 Flash',
-    inputPrice: 0.3,
-    outputPrice: 2.5,
+    id: 'custom',
+    label: 'Custom OpenAI-Compatible',
+    keyPlaceholder: 'API key',
+    endpoint: '',
+    models: [
+      { id: 'gpt-4o-mini', label: 'Default model', inputPrice: 0, outputPrice: 0 },
+    ],
   },
 ]
+
+const defaultModelsByProvider = Object.fromEntries(
+  aiProviders.map((provider) => [provider.id, provider.models[0].id]),
+)
 
 function todayUsageKey() {
   return new Date().toISOString().slice(0, 10)
@@ -404,13 +446,39 @@ function readJsonStorage(key, fallback) {
 
 function defaultAiSettings() {
   return {
-    apiKey: '',
-    model: 'gemini-3.1-flash-lite-preview',
+    provider: 'gemini',
+    apiKeys: {},
+    draftApiKey: '',
+    models: { ...defaultModelsByProvider },
+    customEndpoint: '',
+    customModel: 'gpt-4o-mini',
     priceMode: 'free',
     dailyRequestLimit: 20,
     dailyTokenLimit: 50000,
     dailyBudgetUsd: 0,
     maxOutputTokens: 1400,
+  }
+}
+
+function normalizeAiSettings(savedSettings) {
+  const defaults = defaultAiSettings()
+  const saved = savedSettings || {}
+  const provider = getAiProvider(saved.provider).id
+  const apiKeys = { ...(saved.apiKeys || {}) }
+  const models = { ...defaultModelsByProvider, ...(saved.models || {}) }
+
+  if (saved.apiKey && !apiKeys.gemini) apiKeys.gemini = saved.apiKey
+  if (saved.model && !saved.models?.gemini) models.gemini = saved.model
+
+  return {
+    ...defaults,
+    ...saved,
+    provider,
+    apiKeys,
+    draftApiKey: apiKeys[provider] || '',
+    models,
+    customEndpoint: saved.customEndpoint || defaults.customEndpoint,
+    customModel: saved.customModel || defaults.customModel,
   }
 }
 
@@ -434,13 +502,26 @@ function estimateTokens(text) {
   return Math.max(1, Math.ceil(String(text || '').length / 4))
 }
 
-function getGeminiModel(modelId) {
-  return geminiModels.find((model) => model.id === modelId) || geminiModels[0]
+function getAiProvider(providerId) {
+  return aiProviders.find((provider) => provider.id === providerId) || aiProviders[0]
 }
 
-function estimateGeminiCost(modelId, inputTokens, outputTokens, priceMode) {
-  if (priceMode === 'free') return 0
-  const model = getGeminiModel(modelId)
+function getAiModel(settings) {
+  const provider = getAiProvider(settings.provider)
+  const modelId = settings.provider === 'custom'
+    ? settings.customModel
+    : settings.models?.[settings.provider] || provider.models[0].id
+  return provider.models.find((model) => model.id === modelId) || {
+    id: modelId,
+    label: modelId,
+    inputPrice: 0,
+    outputPrice: 0,
+  }
+}
+
+function estimateAiCost(settings, inputTokens, outputTokens) {
+  if (settings.priceMode === 'free') return 0
+  const model = getAiModel(settings)
   return (inputTokens / 1_000_000) * model.inputPrice + (outputTokens / 1_000_000) * model.outputPrice
 }
 
@@ -483,6 +564,91 @@ function parseAiJson(text) {
   const trimmed = String(text || '').trim()
   const jsonText = trimmed.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim()
   return JSON.parse(jsonText)
+}
+
+async function requestAiCoder(settings, prompt, maxOutputTokens) {
+  const provider = getAiProvider(settings.provider)
+  const apiKey = settings.apiKeys?.[settings.provider]?.trim()
+  const model = getAiModel(settings)
+
+  if (!apiKey) {
+    throw new Error(`Save a ${provider.label} API key first.`)
+  }
+
+  if (settings.provider === 'gemini') {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: prompt }],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.2,
+            maxOutputTokens,
+          },
+        }),
+      },
+    )
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error?.message || `Gemini request failed (${response.status})`)
+
+    return {
+      text: data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n') || '',
+      inputTokens: data.usageMetadata?.promptTokenCount,
+      outputTokens: data.usageMetadata?.candidatesTokenCount,
+      totalTokens: data.usageMetadata?.totalTokenCount,
+    }
+  }
+
+  const endpoint = settings.provider === 'custom'
+    ? settings.customEndpoint?.trim()
+    : provider.endpoint
+  if (!endpoint) throw new Error('Enter a custom OpenAI-compatible endpoint first.')
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...(settings.provider === 'openrouter'
+        ? {
+            'HTTP-Referer': window.location.origin,
+            'X-Title': 'Browser Dev Workspace',
+          }
+        : {}),
+    },
+    body: JSON.stringify({
+      model: model.id,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: maxOutputTokens,
+      response_format: { type: 'json_object' },
+    }),
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error?.message || `AI request failed (${response.status})`)
+
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    inputTokens: data.usage?.prompt_tokens,
+    outputTokens: data.usage?.completion_tokens,
+    totalTokens: data.usage?.total_tokens,
+  }
 }
 
 function databaseRequest(request) {
@@ -994,11 +1160,12 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(true)
   const [autosaveEnabled, setAutosaveEnabled] = useState(() => localStorage.getItem('ide-autosave') !== 'false')
   const [theme, setTheme] = useState(() => localStorage.getItem('ide-theme') || 'blackblue')
-  const [aiSettings, setAiSettings] = useState(() => readJsonStorage(aiSettingsStorageKey, defaultAiSettings()))
+  const [aiSettings, setAiSettings] = useState(() => normalizeAiSettings(readJsonStorage(aiSettingsStorageKey, {})))
   const [aiUsage, setAiUsage] = useState(() => normalizeAiUsage(readJsonStorage(aiUsageStorageKey, defaultAiUsage())))
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiResult, setAiResult] = useState(null)
-  const [aiStatus, setAiStatus] = useState('Add a Gemini key, set caps, then ask for a code change.')
+  const [aiStatus, setAiStatus] = useState('Save an AI provider key, set caps, then ask for a code change.')
+  const [apiKeyStatus, setApiKeyStatus] = useState('')
   const [isAiRunning, setIsAiRunning] = useState(false)
   const [rightPanelTab, setRightPanelTab] = useState('preview')
   const [bottomPanelTab, setBottomPanelTab] = useState('terminal')
@@ -1245,7 +1412,21 @@ export default function App() {
   }, [theme])
 
   useEffect(() => {
-    localStorage.setItem(aiSettingsStorageKey, JSON.stringify(aiSettings))
+    setAiSettings((settings) => ({
+      ...settings,
+      draftApiKey: settings.apiKeys?.[settings.provider] || '',
+    }))
+    setApiKeyStatus('')
+  }, [aiSettings.provider])
+
+  useEffect(() => {
+    localStorage.setItem(
+      aiSettingsStorageKey,
+      JSON.stringify({
+        ...aiSettings,
+        draftApiKey: aiSettings.apiKeys?.[aiSettings.provider] || '',
+      }),
+    )
   }, [aiSettings])
 
   useEffect(() => {
@@ -1417,7 +1598,8 @@ export default function App() {
       requestsLeft: Math.max(0, requestLimit - normalizedUsage.requests),
       tokensLeft: Math.max(0, tokenLimit - usedTokens),
       budgetLeft: Math.max(0, budget - normalizedUsage.estimatedCostUsd),
-      model: getGeminiModel(aiSettings.model),
+      provider: getAiProvider(aiSettings.provider),
+      model: getAiModel(aiSettings),
     }
   }, [aiSettings, aiUsage])
 
@@ -1527,11 +1709,12 @@ export default function App() {
   }, [])
 
   const runAiCoder = useCallback(async () => {
-    const apiKey = aiSettings.apiKey.trim()
+    const provider = getAiProvider(aiSettings.provider)
+    const apiKey = aiSettings.apiKeys?.[aiSettings.provider]?.trim()
     const request = aiPrompt.trim()
 
     if (!apiKey) {
-      setAiStatus('Paste a Gemini API key first.')
+      setAiStatus(`Save a ${provider.label} API key first.`)
       return
     }
 
@@ -1550,12 +1733,7 @@ export default function App() {
     })
     const estimatedInputTokens = estimateTokens(prompt)
     const estimatedOutputTokens = Number(aiSettings.maxOutputTokens) || 1400
-    const estimatedCost = estimateGeminiCost(
-      aiSettings.model,
-      estimatedInputTokens,
-      estimatedOutputTokens,
-      aiSettings.priceMode,
-    )
+    const estimatedCost = estimateAiCost(aiSettings, estimatedInputTokens, estimatedOutputTokens)
     const currentUsage = normalizeAiUsage(aiUsage)
     const currentTokens = currentUsage.inputTokens + currentUsage.outputTokens
     const dailyRequestLimit = Number(aiSettings.dailyRequestLimit) || 0
@@ -1578,52 +1756,18 @@ export default function App() {
     }
 
     setIsAiRunning(true)
-    setAiStatus('Asking Gemini for a patch...')
+    setAiStatus(`Asking ${provider.label} for a patch...`)
     setAiResult(null)
 
     try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${aiSettings.model}:generateContent`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey,
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: prompt }],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature: 0.2,
-              maxOutputTokens: estimatedOutputTokens,
-            },
-          }),
-        },
-      )
-
-      const data = await response.json()
-      if (!response.ok) {
-        throw new Error(data.error?.message || `Gemini request failed (${response.status})`)
-      }
-
-      const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n') || ''
+      const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
+      const text = response.text
       const parsed = parseAiJson(text)
-      const usageMetadata = data.usageMetadata || {}
-      const actualInputTokens = usageMetadata.promptTokenCount || estimatedInputTokens
+      const actualInputTokens = response.inputTokens || estimatedInputTokens
       const actualOutputTokens =
-        usageMetadata.candidatesTokenCount ||
-        Math.max(estimateTokens(text), usageMetadata.totalTokenCount ? usageMetadata.totalTokenCount - actualInputTokens : 1)
-      const actualCost = estimateGeminiCost(
-        aiSettings.model,
-        actualInputTokens,
-        actualOutputTokens,
-        aiSettings.priceMode,
-      )
+        response.outputTokens ||
+        Math.max(estimateTokens(text), response.totalTokens ? response.totalTokens - actualInputTokens : 1)
+      const actualCost = estimateAiCost(aiSettings, actualInputTokens, actualOutputTokens)
 
       setAiUsage((current) => {
         const normalized = normalizeAiUsage(current)
@@ -1705,6 +1849,45 @@ export default function App() {
     localStorage.setItem(aiUsageStorageKey, JSON.stringify(nextUsage))
     setAiStatus('Local AI usage counters reset.')
   }, [])
+
+  const saveCurrentApiKey = useCallback(() => {
+    const provider = getAiProvider(aiSettings.provider)
+    const key = aiSettings.draftApiKey.trim()
+
+    if (!key) {
+      setApiKeyStatus(`Enter a ${provider.label} API key before saving.`)
+      return
+    }
+
+    const nextSettings = {
+      ...aiSettings,
+      apiKeys: {
+        ...aiSettings.apiKeys,
+        [aiSettings.provider]: key,
+      },
+      draftApiKey: key,
+    }
+
+    setAiSettings(nextSettings)
+    localStorage.setItem(aiSettingsStorageKey, JSON.stringify(nextSettings))
+    setApiKeyStatus(`${provider.label} key saved in this browser.`)
+    setAiStatus(`${provider.label} key saved. Ask the AI coder for a change.`)
+  }, [aiSettings])
+
+  const forgetCurrentApiKey = useCallback(() => {
+    const provider = getAiProvider(aiSettings.provider)
+    const nextKeys = { ...aiSettings.apiKeys }
+    delete nextKeys[aiSettings.provider]
+    const nextSettings = {
+      ...aiSettings,
+      apiKeys: nextKeys,
+      draftApiKey: '',
+    }
+
+    setAiSettings(nextSettings)
+    localStorage.setItem(aiSettingsStorageKey, JSON.stringify(nextSettings))
+    setApiKeyStatus(`${provider.label} key removed from this browser.`)
+  }, [aiSettings])
 
   const selectBottomPanelTab = useCallback((tab) => {
     setBottomPanelTab(tab)
@@ -2431,27 +2614,85 @@ export default function App() {
           <div className="ai-header">
             <div>
               <strong>AI Coder</strong>
-              <span>{aiSettings.priceMode === 'free' ? 'Free-tier local tracker' : 'Paid estimate tracker'}</span>
+              <span>
+                {aiUsageSummary.provider.label} / {aiSettings.priceMode === 'free' ? 'Free-tier local tracker' : 'Paid estimate tracker'}
+              </span>
             </div>
             <button type="button" onClick={resetAiUsage}>Reset Usage</button>
           </div>
 
           <div className="ai-settings-grid">
-            <input
-              type="password"
-              value={aiSettings.apiKey}
-              placeholder="Gemini API key"
-              autoComplete="off"
-              onChange={(event) => setAiSettings((settings) => ({ ...settings, apiKey: event.target.value }))}
-            />
-            <select
-              value={aiSettings.model}
-              onChange={(event) => setAiSettings((settings) => ({ ...settings, model: event.target.value }))}
-            >
-              {geminiModels.map((model) => (
-                <option key={model.id} value={model.id}>{model.label}</option>
-              ))}
-            </select>
+            <label className="ai-wide">
+              Provider
+              <select
+                value={aiSettings.provider}
+                onChange={(event) => setAiSettings((settings) => ({
+                  ...settings,
+                  provider: event.target.value,
+                  models: { ...defaultModelsByProvider, ...settings.models },
+                }))}
+              >
+                {aiProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>{provider.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="ai-wide">
+              API key
+              <input
+                type="password"
+                value={aiSettings.draftApiKey}
+                placeholder={aiUsageSummary.provider.keyPlaceholder}
+                autoComplete="off"
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
+              />
+            </label>
+            <div className="ai-key-actions ai-wide">
+              <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
+              <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
+              <span>{apiKeyStatus || (aiSettings.apiKeys?.[aiSettings.provider] ? 'Saved in this browser.' : 'No key saved for this provider.')}</span>
+            </div>
+            {aiSettings.provider === 'custom' ? (
+              <>
+                <label className="ai-wide">
+                  Endpoint
+                  <input
+                    type="url"
+                    value={aiSettings.customEndpoint}
+                    placeholder="https://api.example.com/v1/chat/completions"
+                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customEndpoint: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Model
+                  <input
+                    type="text"
+                    value={aiSettings.customModel}
+                    placeholder="model-name"
+                    onChange={(event) => setAiSettings((settings) => ({ ...settings, customModel: event.target.value }))}
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                Model
+                <select
+                  value={aiSettings.models?.[aiSettings.provider] || aiUsageSummary.provider.models[0].id}
+                  onChange={(event) => setAiSettings((settings) => ({
+                    ...settings,
+                    models: {
+                      ...defaultModelsByProvider,
+                      ...settings.models,
+                      [settings.provider]: event.target.value,
+                    },
+                  }))}
+                >
+                  {aiUsageSummary.provider.models.map((model) => (
+                    <option key={model.id} value={model.id}>{model.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               Mode
               <select

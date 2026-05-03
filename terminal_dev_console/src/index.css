@@ -1277,7 +1277,8 @@ button:disabled {
 
 .ai-header button,
 .ai-actions button,
-.ai-command-list button {
+.ai-command-list button,
+.ai-key-actions button {
   height: 26px;
   flex: 0 0 auto;
   border: 1px solid rgba(96, 165, 250, 0.3);
@@ -1290,7 +1291,8 @@ button:disabled {
 
 .ai-header button:hover,
 .ai-actions button:hover:not(:disabled),
-.ai-command-list button:hover {
+.ai-command-list button:hover,
+.ai-key-actions button:hover {
   border-color: rgba(96, 165, 250, 0.58);
   background: rgba(15, 36, 66, 0.92);
 }
@@ -1328,8 +1330,25 @@ button:disabled {
 }
 
 .ai-settings-grid > input,
-.ai-settings-grid > select {
+.ai-settings-grid > select,
+.ai-settings-grid .ai-wide {
   grid-column: span 2;
+}
+
+.ai-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ai-key-actions span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8fa0b3;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ai-coder-panel textarea {
