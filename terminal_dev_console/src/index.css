@@ -1548,6 +1548,33 @@ button:disabled {
   white-space: nowrap;
 }
 
+.provider-help {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 6px;
+  background: rgba(15, 36, 66, 0.34);
+}
+
+.provider-help a {
+  color: #93c5fd;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.provider-help a:hover {
+  color: #dbeafe;
+  text-decoration: underline;
+}
+
+.provider-help span {
+  color: #8fa0b3;
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
 .ai-coder-panel textarea {
   resize: vertical;
   min-height: 72px;
@@ -1738,6 +1765,16 @@ button:disabled {
   font-size: 0.66rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ai-review-list {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #9fb7d6;
+  font-size: 0.66rem;
+  line-height: 1.4;
 }
 
 .ai-change-list {

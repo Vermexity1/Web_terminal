@@ -362,6 +362,8 @@ const appThemes = [
 
 const aiSettingsStorageKey = 'ide-ai-settings-v1'
 const aiUsageStorageKey = 'ide-ai-usage-v1'
+const googleAiStudioApiKeyUrl = 'https://aistudio.google.com/app/apikey'
+const googleGeminiApiKeyDocsUrl = 'https://ai.google.dev/gemini-api/docs/api-key'
 const aiProviders = [
   {
     id: 'gemini',
@@ -629,13 +631,114 @@ function summarizeChangeSet(edits, existingContents = {}) {
   }
 }
 
-function buildAiPlanPrompt({ userPrompt, activeTab, files, frameworkName, projectName }) {
+const aiAgentRules = `Agent operating rules:
+- Work like a cautious coding agent, not a code autocomplete.
+- Understand the request, inspect relevant files, make a plan, then build the smallest patch that satisfies the plan.
+- Prefer existing architecture, naming, state, CSS, and component patterns.
+- Never rewrite the whole project for a small request.
+- Never remove working WebContainer, terminal, editor, file explorer, preview, import, or settings behavior unless directly requested.
+- Avoid speculative changes. If context is missing, ask or return no edits.
+- Treat generated code as risky: validate paths, avoid unrelated files, and keep the patch reviewable.`
+
+function tokenizeAiText(text) {
+  return new Set(
+    String(text || '')
+      .toLowerCase()
+      .split(/[^a-z0-9_.$/-]+/)
+      .filter((token) => token.length > 2),
+  )
+}
+
+function scoreAiFile(file, requestTokens, activePath) {
+  const path = file.path || ''
+  const lowerPath = path.toLowerCase()
+  let score = 0
+
+  if (path === activePath) score += 100
+  if (['package.json', 'vite.config.js', 'src/App.jsx', 'src/App.tsx', 'src/main.jsx', 'src/main.tsx'].includes(path)) {
+    score += 35
+  }
+  if (lowerPath.includes('/components/') || lowerPath.includes('\\components\\')) score += 12
+  if (lowerPath.endsWith('.jsx') || lowerPath.endsWith('.tsx')) score += 12
+  if (lowerPath.endsWith('.js') || lowerPath.endsWith('.ts')) score += 8
+  if (lowerPath.endsWith('.css')) score += 8
+
+  for (const token of requestTokens) {
+    if (lowerPath.includes(token)) score += token.length > 5 ? 10 : 5
+  }
+
+  return score
+}
+
+function selectAiContextPaths(files, request, activePath, limit = 12) {
+  const requestTokens = tokenizeAiText(request)
+  return files
+    .filter((file) => shouldSearchFile(file.path))
+    .map((file) => ({ path: file.path, score: scoreAiFile(file, requestTokens, activePath) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    .slice(0, limit)
+    .map((item) => item.path)
+}
+
+function formatAiFileContext(fileContents = {}, maxCharsPerFile = 14000) {
+  const entries = Object.entries(fileContents)
+  if (!entries.length) return '(No file contents loaded.)'
+
+  return entries
+    .map(([path, contents]) => {
+      const text = String(contents || '')
+      const clipped = text.length > maxCharsPerFile
+        ? `${text.slice(0, maxCharsPerFile)}\n/* clipped: ${text.length - maxCharsPerFile} chars omitted */`
+        : text
+      return `--- ${path}\n${clipped}`
+    })
+    .join('\n\n')
+}
+
+function normalizeAiEdits(edits, plan, files) {
+  const workspacePaths = new Set(files.map((file) => file.path))
+  const plannedPaths = new Set([
+    ...(plan?.filesToRead || []),
+    ...(plan?.filesToEdit || []),
+  ].map(normalizePath).filter(Boolean))
+  const normalized = []
+  const rejected = []
+
+  for (const edit of edits || []) {
+    const path = normalizePath(edit.path || '')
+    const content = typeof edit.content === 'string' ? edit.content : ''
+
+    if (!path || path.includes('..') || path.startsWith('/') || path.includes('\\')) {
+      rejected.push({ path: edit.path || '(empty)', reason: 'Invalid or unsafe path.' })
+      continue
+    }
+
+    if (!content && workspacePaths.has(path)) {
+      rejected.push({ path, reason: 'Empty replacement for an existing file.' })
+      continue
+    }
+
+    if (plannedPaths.size > 0 && !plannedPaths.has(path) && !workspacePaths.has(path)) {
+      rejected.push({ path, reason: 'New file was not named in the plan.' })
+      continue
+    }
+
+    normalized.push({ ...edit, path, content })
+  }
+
+  return { edits: normalized.slice(0, 12), rejected }
+}
+
+function buildAiPlanPrompt({ userPrompt, activeTab, files, fileContents, frameworkName, projectName }) {
   const fileList = files.slice(0, 120).map((file) => file.path).join('\n')
   const activeFileBlock = activeTab
     ? `Active file: ${activeTab.path}\n\n${activeTab.contents.slice(0, 16000)}`
     : 'No active file is open.'
 
   return `You are a careful coding agent inside a browser IDE. Your first job is to plan, not edit.
+${aiAgentRules}
+
 Project: ${projectName}
 Framework: ${frameworkName}
 
@@ -643,6 +746,9 @@ Workspace files:
 ${fileList || '(empty workspace)'}
 
 ${activeFileBlock}
+
+Relevant file context selected by the IDE:
+${formatAiFileContext(fileContents, 10000)}
 
 User request:
 ${userPrompt}
@@ -665,19 +771,21 @@ Rules:
 - Think like a real coding agent: understand intent, identify relevant files, plan a minimal change, and name verification steps.
 - Prefer existing project patterns and avoid unrelated rewrites.
 - If the request is ambiguous or unsafe, ask questions and leave filesToEdit empty.
-- Only list files that exist in the workspace unless you intentionally plan to create them.`
+- Only list files that exist in the workspace unless you intentionally plan to create them.
+- Include at least one verification command when the project has a package.json.
+- Be extra explicit because the patch step will follow this plan strictly.`
 }
 
 function buildAiPatchPrompt({ userPrompt, plan, activeTab, files, fileContents, frameworkName, projectName }) {
   const fileList = files.slice(0, 160).map((file) => file.path).join('\n')
-  const contextBlock = Object.entries(fileContents || {})
-    .map(([path, contents]) => `--- ${path}\n${String(contents).slice(0, 28000)}`)
-    .join('\n\n')
+  const contextBlock = formatAiFileContext(fileContents, 26000)
   const activeFileBlock = activeTab && !fileContents?.[activeTab.path]
     ? `--- ${activeTab.path}\n${activeTab.contents.slice(0, 18000)}`
     : ''
 
   return `You are a careful coding agent inside a browser IDE. Build from the approved plan.
+${aiAgentRules}
+
 Project: ${projectName}
 Framework: ${frameworkName}
 
@@ -697,6 +805,8 @@ Return ONLY valid JSON. Do not use markdown fences.
 Schema:
 {
   "message": "brief explanation of what changed",
+  "changeSummary": ["specific change made"],
+  "selfReview": ["check you performed before returning"],
   "edits": [
     { "path": "relative/file/path.ext", "content": "full replacement file content" }
   ],
@@ -710,13 +820,23 @@ Rules:
 - Preserve existing working WebContainer, terminal, editor, and preview logic unless the request directly targets them.
 - Do not invent unrelated files or replace the whole project.
 - If needed context is missing, return an empty edits array and explain what must be opened or provided.
+- Before returning, self-review for syntax errors, missing imports, broken state variables, and unrelated regressions.
 - If no edit is needed, return an empty edits array.`
 }
 
 function parseAiJson(text) {
   const trimmed = String(text || '').trim()
   const jsonText = trimmed.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim()
-  return JSON.parse(jsonText)
+  try {
+    return JSON.parse(jsonText)
+  } catch {
+    const firstBrace = jsonText.indexOf('{')
+    const lastBrace = jsonText.lastIndexOf('}')
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(jsonText.slice(firstBrace, lastBrace + 1))
+    }
+    throw new Error('AI returned invalid JSON. Try again or use a stronger model.')
+  }
 }
 
 async function requestAiCoder(settings, prompt, maxOutputTokens) {
@@ -1966,10 +2086,13 @@ export default function App() {
     }
 
     const files = flattenTree(tree)
+    const contextPaths = selectAiContextPaths(files, request, activeTab?.path, 12)
+    const contextContents = await readCurrentFileContents(contextPaths)
     const prompt = buildAiPlanPrompt({
       userPrompt: request,
       activeTab,
       files,
+      fileContents: contextContents,
       frameworkName,
       projectName,
     })
@@ -2070,6 +2193,7 @@ export default function App() {
     aiUsage,
     frameworkName,
     projectName,
+    readCurrentFileContents,
     recordAiUsage,
     tree,
   ])
@@ -2136,7 +2260,8 @@ export default function App() {
       const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
       const text = response.text
       const parsed = parseAiJson(text)
-      const edits = Array.isArray(parsed.edits) ? parsed.edits : []
+      const normalizedEdits = normalizeAiEdits(Array.isArray(parsed.edits) ? parsed.edits : [], aiPlan, files)
+      const edits = normalizedEdits.edits
       const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
       const changeSet = summarizeChangeSet(edits, existingContents)
       const actualInputTokens = response.inputTokens || budget.estimatedInputTokens
@@ -2163,9 +2288,16 @@ export default function App() {
         {
           id: `assistant-patch-${Date.now()}`,
           role: 'assistant',
-          content: parsed.message || `${provider.label} built a proposed patch.`,
+          content: normalizedEdits.rejected.length
+            ? `${parsed.message || `${provider.label} built a proposed patch.`} ${normalizedEdits.rejected.length} unsafe edit(s) were blocked.`
+            : parsed.message || `${provider.label} built a proposed patch.`,
           changes: changeSet.changes,
           commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+          review: [
+            ...(Array.isArray(parsed.changeSummary) ? parsed.changeSummary : []),
+            ...(Array.isArray(parsed.selfReview) ? parsed.selfReview : []),
+            ...normalizedEdits.rejected.map((item) => `Blocked ${item.path}: ${item.reason}`),
+          ],
           usage: {
             inputTokens: actualInputTokens,
             outputTokens: actualOutputTokens,
@@ -2674,6 +2806,13 @@ export default function App() {
                 ))}
               </div>
             ) : null}
+            {message.review?.length ? (
+              <ul className="ai-review-list">
+                {message.review.slice(0, 8).map((item, index) => (
+                  <li key={`${item}-${index}`}>{item}</li>
+                ))}
+              </ul>
+            ) : null}
             {message.commands?.length ? (
               <div className="ai-command-list">
                 {message.commands.map((command) => (
@@ -2772,6 +2911,13 @@ export default function App() {
                 onChange={(event) => setAiSettings((settings) => ({ ...settings, draftApiKey: event.target.value }))}
               />
             </label>
+            {aiSettings.provider === 'gemini' ? (
+              <div className="provider-help ai-wide">
+                <a href={googleAiStudioApiKeyUrl} target="_blank" rel="noreferrer">Get a free Gemini API key</a>
+                <span>Opens Google AI Studio. Google says Gemini API keys can be created from AI Studio.</span>
+                <a href={googleGeminiApiKeyDocsUrl} target="_blank" rel="noreferrer">Google setup docs</a>
+              </div>
+            ) : null}
             <div className="ai-key-actions ai-wide">
               <button type="button" onClick={saveCurrentApiKey}>Save API Key</button>
               <button type="button" onClick={forgetCurrentApiKey}>Forget Key</button>
