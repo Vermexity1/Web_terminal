@@ -1644,7 +1644,7 @@ function AiWorkingAnimation({ phase = 'thinking', steps = [] }) {
   )
 }
 
-function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit }) {
+function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onSubmit, onTryDemo }) {
   const isSignup = mode === 'signup'
 
   return (
@@ -1713,6 +1713,15 @@ function AuthScreen({ mode, form, error, status, onModeChange, onFormChange, onS
             {isSignup ? 'Create Account' : 'Sign In'}
           </button>
         </form>
+        <div className="auth-demo-card">
+          <div>
+            <strong>Neon Runner Demo</strong>
+            <span>Open a temporary test project with a runnable game.</span>
+          </div>
+          <button type="button" className="auth-demo-action" onClick={onTryDemo}>
+            Try Demo
+          </button>
+        </div>
         {error ? <p className="auth-error">{error}</p> : null}
         {status ? <p className="auth-status">{status}</p> : null}
       </section>
@@ -1802,6 +1811,7 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState('')
   const [cloudProjects, setCloudProjects] = useState([])
   const [activeCloudProject, setActiveCloudProject] = useState(null)
+  const [isDemoSession, setIsDemoSession] = useState(false)
   const [newProjectName, setNewProjectName] = useState('New Browser Project')
   const [projectHubStatus, setProjectHubStatus] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
@@ -1926,6 +1936,7 @@ export default function App() {
       setAuthForm({ name: '', email: authForm.email, password: '' })
       setAuthStatus('Choose a project to continue.')
       setProjectHubStatus('')
+      setIsDemoSession(false)
     } catch (error) {
       setAuthError(error.message)
       setAuthStatus('')
@@ -1940,6 +1951,38 @@ export default function App() {
     loadCloudProjects,
     theme,
   ])
+
+  const handleTryDemo = useCallback(() => {
+    const now = Date.now()
+    const demoSettings = buildCloudSettings({ theme, layoutMode, autosaveEnabled, aiSettings })
+    const demoProject = {
+      id: `demo_${now}`,
+      name: 'Neon Runner Demo',
+      files: demoGameFiles,
+      isDemo: true,
+      createdAt: now,
+      updatedAt: now,
+      lastOpenedAt: now,
+    }
+
+    setAuthError('')
+    setAuthStatus('Loading Neon Runner demo...')
+    setIsDemoSession(true)
+    setCurrentUser({
+      id: 'demo_user',
+      email: 'demo@web-terminal.local',
+      name: 'Demo Guest',
+      settings: demoSettings,
+      createdAt: now,
+    })
+    setCloudProjects([])
+    loadedCloudProjectIdRef.current = ''
+    setActiveCloudProject(demoProject)
+    setProjectName(demoProject.name)
+    setProjectHubStatus('')
+    setAuthForm({ name: '', email: '', password: '' })
+    setOperationStatus('Loading the Neon Runner demo project...')
+  }, [aiSettings, autosaveEnabled, layoutMode, theme])
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -1963,6 +2006,7 @@ export default function App() {
     setAuthError('')
     setAuthMode('signin')
     setAuthForm({ name: '', email: '', password: '' })
+    setIsDemoSession(false)
   }, [])
 
   const refreshExplorer = useCallback(async (container = webcontainer) => {
@@ -2005,7 +2049,7 @@ export default function App() {
           files,
           savedAt: Date.now(),
         })
-        if (activeProject?.id) {
+        if (activeProject?.id && !activeProject.isDemo) {
           const data = await apiRequest('/api/projects', {
             method: 'POST',
             body: {
@@ -2134,6 +2178,11 @@ export default function App() {
 
   const returnToProjectHub = useCallback(async () => {
     stopDevServer()
+    if (isDemoSession || activeCloudProject?.isDemo) {
+      handleSignOut()
+      return
+    }
+
     if (webcontainer && activeCloudProject?.id) {
       try {
         setProjectHubStatus('Saving project before switching...')
@@ -2156,7 +2205,7 @@ export default function App() {
     loadedCloudProjectIdRef.current = ''
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
-  }, [activeCloudProject, loadCloudProjects, stopDevServer, webcontainer])
+  }, [activeCloudProject, handleSignOut, isDemoSession, loadCloudProjects, stopDevServer, webcontainer])
 
   const saveActiveFile = useCallback(async () => {
     if (!webcontainer || !activeTab) return
@@ -2245,10 +2294,14 @@ export default function App() {
         const data = await apiRequest('/api/auth')
         if (cancelled) return
         setCurrentUser(data.user || null)
+        setIsDemoSession(false)
         if (data.user?.settings) applyCloudSettings(data.user.settings)
         if (data.user) await loadCloudProjects()
       } catch {
-        if (!cancelled) setCurrentUser(null)
+        if (!cancelled) {
+          setCurrentUser(null)
+          setIsDemoSession(false)
+        }
       } finally {
         if (!cancelled) setAuthLoading(false)
       }
@@ -2261,7 +2314,7 @@ export default function App() {
   }, [applyCloudSettings, loadCloudProjects])
 
   useEffect(() => {
-    if (!currentUser) return undefined
+    if (!currentUser || isDemoSession) return undefined
 
     window.clearTimeout(cloudSettingsTimerRef.current)
     cloudSettingsTimerRef.current = window.setTimeout(() => {
@@ -2274,7 +2327,7 @@ export default function App() {
     }, 900)
 
     return () => window.clearTimeout(cloudSettingsTimerRef.current)
-  }, [aiSettings, autosaveEnabled, currentUser, layoutMode, theme])
+  }, [aiSettings, autosaveEnabled, currentUser, isDemoSession, layoutMode, theme])
 
   useEffect(() => {
     getSavedSnapshot().then((snapshot) => {
@@ -3463,11 +3516,16 @@ export default function App() {
     importProjectFiles(activeCloudProject.files || [], activeCloudProject.name || 'Cloud Project', {
       skipSnapshot: true,
       allowEmpty: true,
-    }).then(() => {
-      setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
+    }).then(async () => {
+      if (activeCloudProject.isDemo) {
+        await openFile('src/main.js', webcontainer)
+        setOperationStatus('Demo game loaded. Run npm install, then npm run dev.')
+      } else {
+        setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
+      }
       setProjectHubStatus('')
     })
-  }, [activeCloudProject, importProjectFiles, webcontainer])
+  }, [activeCloudProject, importProjectFiles, openFile, webcontainer])
 
   const openLocalFolder = useCallback(async () => {
     if (!webcontainer) return
@@ -3927,6 +3985,7 @@ export default function App() {
         }}
         onFormChange={setAuthForm}
         onSubmit={handleAuthSubmit}
+        onTryDemo={handleTryDemo}
       />
     )
   }

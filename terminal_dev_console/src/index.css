@@ -264,6 +264,50 @@ button {
   font-weight: 800;
 }
 
+.auth-demo-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.14), rgba(3, 7, 18, 0.74));
+}
+
+.auth-demo-card strong,
+.auth-demo-card span {
+  display: block;
+  min-width: 0;
+}
+
+.auth-demo-card strong {
+  color: #edf2ff;
+  font-size: 0.86rem;
+}
+
+.auth-demo-card span {
+  margin-top: 3px;
+  color: #8fa3bb;
+  font-size: 0.72rem;
+}
+
+.auth-demo-action {
+  height: 34px;
+  min-width: 92px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 7px;
+  color: #dce8f8;
+  background: rgba(5, 14, 30, 0.82);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.auth-demo-action:hover {
+  border-color: rgba(147, 197, 253, 0.7);
+  background: rgba(37, 99, 235, 0.24);
+}
+
 .auth-error,
 .auth-status,
 .project-status {
@@ -2890,6 +2934,14 @@ body.is-resizing * {
 
   .project-create {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .auth-demo-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .auth-demo-action {
+    width: 100%;
   }
 
   .project-list button {
