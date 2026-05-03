@@ -3,9 +3,13 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 const MonacoEditor = lazy(() => import('@monaco-editor/react'))
 
 let webcontainerBootPromise
+let pyodideLoadPromise
 
 const ignoredExplorerNames = new Set(['node_modules', '.git', 'dist'])
 const defaultRunPort = 5173
+const pyodideVersion = '0.26.4'
+const pyodideIndexUrl = `https://cdn.jsdelivr.net/pyodide/v${pyodideVersion}/full/`
+const pythonWorkspaceRoot = '/workspace'
 
 const quickCommands = [
   { label: 'Install packages', command: 'npm install', group: 'npm', hint: 'Install dependencies' },
@@ -24,6 +28,11 @@ const quickCommands = [
   { label: 'Node version', command: 'node -v', group: 'runtime', hint: 'Node.js version' },
   { label: 'NPM version', command: 'npm -v', group: 'runtime', hint: 'npm version' },
   { label: 'Run Node snippet', command: "node -e \"console.log('Hello from WebContainer')\"", group: 'runtime', hint: 'Inline JS' },
+  { label: 'Python version', command: 'python --version', group: 'python', hint: 'Load the Python runtime' },
+  { label: 'Python hello', command: "python -c \"print('Hello from browser Python')\"", group: 'python', hint: 'Inline Python' },
+  { label: 'Run main.py', command: 'python main.py', group: 'python', hint: 'Run a Python file' },
+  { label: 'Install Python pkg', command: 'pip install numpy', group: 'python', hint: 'Install Pyodide package' },
+  { label: 'Python sample', command: 'webterm create-python-sample', group: 'python', hint: 'Create a runnable Python file' },
   { label: 'Env', command: 'env', group: 'runtime', hint: 'Environment vars' },
   { label: 'Processes', command: 'ps aux', group: 'runtime', hint: 'Running processes' },
   { label: 'Kill Node', command: 'pkill node', group: 'runtime', hint: 'Stop node processes' },
@@ -340,11 +349,32 @@ Click the preview and press Space or click to jump.
 const snapshotDatabaseName = 'browser-dev-workspace'
 const snapshotStoreName = 'snapshots'
 const currentSnapshotKey = 'current'
+const pythonSamplePath = 'main.py'
+const pythonSampleSource = `import math
+import random
+
+print("Neon Number Dash")
+print("The browser Python runtime is live.")
+
+score = 0
+for round_number in range(1, 6):
+    target = random.randint(3, 12)
+    boost = math.ceil(math.sqrt(target * round_number))
+    score += target + boost
+    print(f"round {round_number}: target={target}, boost={boost}, score={score}")
+
+print("final score:", score)
+`
+
 const searchableFileExtensions = new Set([
   '.js',
   '.jsx',
   '.ts',
   '.tsx',
+  '.py',
+  '.toml',
+  '.ini',
+  '.cfg',
   '.json',
   '.css',
   '.html',
@@ -1345,6 +1375,9 @@ function pickDefaultFile(files) {
     'src/App.tsx',
     'src/main.jsx',
     'src/main.tsx',
+    'main.py',
+    'app.py',
+    'pyproject.toml',
     'app/page.tsx',
     'pages/index.js',
     'index.html',
@@ -1361,13 +1394,203 @@ function getRunCommandForPath(path) {
 
   if (/\.(mjs|cjs|js)$/.test(lowerPath)) return `node ${quotedPath}`
   if (/\.(ts|tsx|jsx)$/.test(lowerPath)) return `npx tsx ${quotedPath}`
+  if (/\.py$/.test(lowerPath)) return `python ${quotedPath}`
   if (/\.(sh|bash)$/.test(lowerPath)) return `sh ${quotedPath}`
   if (/\.json$/.test(lowerPath)) return `cat ${quotedPath}`
   if (/\.html?$/.test(lowerPath)) return `npx vite --host 0.0.0.0 --port ${defaultRunPort}`
   if (/\.css$/.test(lowerPath)) return `cat ${quotedPath}`
   if (/\.md$/.test(lowerPath)) return `cat ${quotedPath}`
 
-  return `node ${quotedPath}`
+  return `webterm explain-runtime ${quotedPath}`
+}
+
+function tokenizeCommandLine(command) {
+  const tokens = []
+  let current = ''
+  let quote = ''
+  let escaping = false
+
+  for (const char of command.trim()) {
+    if (escaping) {
+      current += char
+      escaping = false
+      continue
+    }
+
+    if (char === '\\') {
+      escaping = true
+      continue
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = ''
+      } else {
+        current += char
+      }
+      continue
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      continue
+    }
+
+    current += char
+  }
+
+  if (escaping) current += '\\'
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function getPythonCommandRequest(command) {
+  const tokens = tokenizeCommandLine(command)
+  const executable = tokens[0]?.toLowerCase()
+
+  if (executable === 'python' || executable === 'python3' || executable === 'py') {
+    if (tokens.includes('--version') || tokens.includes('-V')) {
+      return { type: 'version' }
+    }
+
+    const inlineIndex = tokens.indexOf('-c')
+    if (inlineIndex >= 0) {
+      return { type: 'inline', code: tokens.slice(inlineIndex + 1).join(' ') }
+    }
+
+    if (tokens[1] === '-m' && tokens[2] === 'pip' && tokens[3] === 'install') {
+      return { type: 'pip', packages: tokens.slice(4).filter((token) => !token.startsWith('-')) }
+    }
+
+    const fileIndex = tokens.findIndex((token, index) => index > 0 && !token.startsWith('-'))
+    if (fileIndex > 0) {
+      return {
+        type: 'file',
+        path: normalizePath(tokens[fileIndex]),
+        args: tokens.slice(fileIndex + 1),
+      }
+    }
+    return { type: 'repl' }
+  }
+
+  if (executable === 'pip' && tokens[1] === 'install') {
+    return { type: 'pip', packages: tokens.slice(2).filter((token) => !token.startsWith('-')) }
+  }
+
+  return null
+}
+
+function getWebTerminalCommandRequest(command) {
+  const tokens = tokenizeCommandLine(command)
+  const executable = tokens[0]?.toLowerCase()
+  if (executable !== 'webterm' && executable !== 'webterminal') return null
+  return { action: tokens[1], args: tokens.slice(2) }
+}
+
+function pyodidePathExists(pyodide, path) {
+  try {
+    pyodide.FS.stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function ensurePyodideDirectory(pyodide, dir) {
+  const normalizedDir = dir.replace(/\/+/g, '/')
+  if (!normalizedDir || normalizedDir === '/') return
+
+  let current = ''
+  for (const part of normalizedDir.split('/').filter(Boolean)) {
+    current += `/${part}`
+    if (!pyodidePathExists(pyodide, current)) {
+      pyodide.FS.mkdir(current)
+    }
+  }
+}
+
+function removePyodidePath(pyodide, path) {
+  if (!pyodidePathExists(pyodide, path)) return
+
+  const stat = pyodide.FS.stat(path)
+  if (pyodide.FS.isDir(stat.mode)) {
+    for (const child of pyodide.FS.readdir(path)) {
+      if (child === '.' || child === '..') continue
+      removePyodidePath(pyodide, `${path}/${child}`)
+    }
+    if (path !== pythonWorkspaceRoot) pyodide.FS.rmdir(path)
+    return
+  }
+
+  pyodide.FS.unlink(path)
+}
+
+async function loadPythonRuntime() {
+  if (pyodideLoadPromise) return pyodideLoadPromise
+
+  pyodideLoadPromise = new Promise((resolve, reject) => {
+    const load = async () => {
+      try {
+        const pyodide = await window.loadPyodide({ indexURL: pyodideIndexUrl })
+        resolve(pyodide)
+      } catch (error) {
+        pyodideLoadPromise = null
+        reject(error)
+      }
+    }
+
+    if (window.loadPyodide) {
+      load()
+      return
+    }
+
+    const existingScript = document.querySelector('script[data-pyodide-runtime="true"]')
+    if (existingScript) {
+      existingScript.addEventListener('load', load, { once: true })
+      existingScript.addEventListener('error', () => {
+        pyodideLoadPromise = null
+        reject(new Error('Python runtime failed to download.'))
+      }, { once: true })
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = `${pyodideIndexUrl}pyodide.js`
+    script.async = true
+    script.crossOrigin = 'anonymous'
+    script.dataset.pyodideRuntime = 'true'
+    script.addEventListener('load', load, { once: true })
+    script.addEventListener('error', () => {
+      pyodideLoadPromise = null
+      reject(new Error('Python runtime failed to download.'))
+    }, { once: true })
+    document.head.append(script)
+  })
+
+  return pyodideLoadPromise
+}
+
+async function syncWorkspaceToPython(pyodide, webcontainer) {
+  ensurePyodideDirectory(pyodide, pythonWorkspaceRoot)
+  removePyodidePath(pyodide, pythonWorkspaceRoot)
+  ensurePyodideDirectory(pyodide, pythonWorkspaceRoot)
+
+  const files = await readWorkspaceFiles(webcontainer)
+  for (const file of files) {
+    const normalizedPath = normalizePath(file.path)
+    const fullPath = `${pythonWorkspaceRoot}/${normalizedPath}`
+    const directory = fullPath.split('/').slice(0, -1).join('/')
+    ensurePyodideDirectory(pyodide, directory)
+    pyodide.FS.writeFile(fullPath, file.data)
+  }
 }
 
 async function readExplorerTree(webcontainer, dir = '') {
@@ -1434,7 +1657,7 @@ function FileTree({ nodes, activePath, changedPaths = [], onOpenFile, onSelectPa
   )
 }
 
-function TerminalPanel({ webcontainer, onReady, onOutput }) {
+function TerminalPanel({ webcontainer, onReady, onOutput, onInterceptCommand }) {
   const terminalElementRef = useRef(null)
 
   useEffect(() => {
@@ -1448,6 +1671,7 @@ function TerminalPanel({ webcontainer, onReady, onOutput }) {
     let dataDisposable
     let resizeObserver
     let killShellOnLeave
+    let currentLine = ''
 
     async function connectTerminal() {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -1502,7 +1726,41 @@ function TerminalPanel({ webcontainer, onReady, onOutput }) {
 
       inputWriter = shellProcess.input.getWriter()
       dataDisposable = terminal.onData((data) => {
-        inputWriter.write(data)
+        if (data.startsWith('\x1b')) {
+          inputWriter.write(data)
+          return
+        }
+
+        for (const char of data) {
+          if (char === '\r' || char === '\n') {
+            const command = currentLine.trim()
+            currentLine = ''
+
+            if (command && onInterceptCommand?.(command)) {
+              inputWriter.write('\x15')
+              terminal.write('\r\n')
+              continue
+            }
+
+            inputWriter.write(char)
+            continue
+          }
+
+          if (char === '\u007f') {
+            currentLine = currentLine.slice(0, -1)
+            inputWriter.write(char)
+            continue
+          }
+
+          if (char === '\x03' || char === '\x15') {
+            currentLine = ''
+            inputWriter.write(char)
+            continue
+          }
+
+          if (char >= ' ') currentLine += char
+          inputWriter.write(char)
+        }
       })
       shellProcess.output.pipeTo(
         new WritableStream({
@@ -1556,7 +1814,7 @@ function TerminalPanel({ webcontainer, onReady, onOutput }) {
       shellProcess?.kill()
       terminal?.dispose()
     }
-  }, [onOutput, onReady, webcontainer])
+  }, [onInterceptCommand, onOutput, onReady, webcontainer])
 
   return <div className="terminal-host" ref={terminalElementRef} />
 }
@@ -1573,8 +1831,8 @@ function StartScreen({ bootStatus, isImporting, onOpenFolder, onOpenFiles, onLoa
         <p className="start-kicker">{bootStatus}</p>
         <h1>Drop your project into the terminal.</h1>
         <p>
-          Open a folder, install packages, and run scripts in a real browser-based
-          Node.js environment. Nothing starts until you choose what to run.
+          Open a folder, install packages, run Python files, and run scripts in a real
+          browser-based development environment. Nothing starts until you choose what to run.
         </p>
         <div className="start-actions">
           <button type="button" className="primary-action" onClick={onOpenFolder} disabled={isImporting}>
@@ -1848,11 +2106,12 @@ export default function App() {
   const [hasSavedProject, setHasSavedProject] = useState(false)
   const [projectScripts, setProjectScripts] = useState([])
   const [frameworkName, setFrameworkName] = useState('Unknown')
+  const [languageStatus, setLanguageStatus] = useState('Node ready')
   const [problems, setProblems] = useState([])
   const [showOnboarding, setShowOnboarding] = useState(true)
   const [autosaveEnabled, setAutosaveEnabled] = useState(() => localStorage.getItem('ide-autosave') !== 'false')
   const [theme, setTheme] = useState(() => localStorage.getItem('ide-theme') || 'blackblue')
-  const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('ide-layout-mode') || 'agentCode')
+  const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('ide-layout-mode') || 'all')
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [aiSettings, setAiSettings] = useState(() => normalizeAiSettings(readJsonStorage(aiSettingsStorageKey, {})))
   const [aiUsage, setAiUsage] = useState(() => normalizeAiUsage(readJsonStorage(aiUsageStorageKey, defaultAiUsage())))
@@ -2048,8 +2307,29 @@ export default function App() {
       setProjectScripts(scripts)
       setFrameworkName(detectFramework(packageJson))
     } catch {
-      setProjectScripts([])
-      setFrameworkName('No package.json')
+      const pythonScripts = []
+      for (const candidate of ['main.py', 'app.py']) {
+        try {
+          await container.fs.readFile(candidate)
+          pythonScripts.push({
+            label: `Python: ${candidate}`,
+            command: `python ${candidate}`,
+            group: 'python',
+            hint: 'Run Python entry file',
+          })
+        } catch {
+          // Missing Python entrypoints are ignored.
+        }
+      }
+
+      try {
+        await container.fs.readFile('pyproject.toml')
+        setFrameworkName('Python project')
+      } catch {
+        setFrameworkName(pythonScripts.length ? 'Python project' : 'No package.json')
+      }
+
+      setProjectScripts(pythonScripts)
     }
   }, [webcontainer])
 
@@ -2438,7 +2718,7 @@ export default function App() {
         }
 
         setBootStatus('Ready')
-        setOperationStatus('Open a folder or files to start running code in the browser.')
+        setOperationStatus('Open a folder or files to start running Node, Python, and browser code.')
       } catch (error) {
         setIsInstalling(false)
         setBootStatus('WebContainer failed to start')
@@ -2463,9 +2743,25 @@ export default function App() {
     [],
   )
 
+  const activeRunCommand = useMemo(
+    () => activeTab ? getRunCommandForPath(activeTab.path) : '',
+    [activeTab],
+  )
+
   const dynamicCommands = useMemo(
-    () => [...projectScripts, ...quickCommands],
-    [projectScripts],
+    () => [
+      ...(activeTab
+        ? [{
+            label: `Run ${activeTab.path.split('/').pop()}`,
+            command: activeRunCommand,
+            group: 'active',
+            hint: 'Run the open file with the matching runtime',
+          }]
+        : []),
+      ...projectScripts,
+      ...quickCommands,
+    ],
+    [activeRunCommand, activeTab, projectScripts],
   )
 
   const commandGroups = useMemo(
@@ -2559,7 +2855,188 @@ export default function App() {
     }
   }, [searchQuery, tree, webcontainer])
 
+  const runPythonRequest = useCallback(async (request, originalCommand) => {
+    if (!webcontainer) {
+      setOperationStatus('The browser runtime is still starting. Try again in a moment.')
+      return
+    }
+
+    setActiveActivity('commands')
+    setBottomPanelTab('terminal')
+    writeTerminal(`\r\n\x1b[1;35m$ ${originalCommand}\x1b[0m\r\n`)
+
+    try {
+      setLanguageStatus('Loading Python...')
+      const pyodide = await loadPythonRuntime()
+
+      pyodide.setStdout({
+        batched: (line) => writeTerminal(`${line}\r\n`),
+      })
+      pyodide.setStderr({
+        batched: (line) => writeTerminal(`\x1b[31m${line}\x1b[0m\r\n`),
+      })
+
+      if (request.type === 'version') {
+        const version = pyodide.runPython('import sys; sys.version.split()[0]')
+        writeTerminal(`Python ${version} (Pyodide ${pyodideVersion})\r\n`)
+        setLanguageStatus(`Python ${version}`)
+        setOperationStatus(`Python ${version} is ready.`)
+        return
+      }
+
+      if (request.type === 'repl') {
+        writeTerminal('Interactive Python REPL is not available yet. Run a .py file or use python -c "print(123)".\r\n')
+        setOperationStatus('Use Run File, python file.py, or python -c for browser Python.')
+        setLanguageStatus('Python ready')
+        return
+      }
+
+      if (request.type === 'pip') {
+        if (!request.packages?.length) {
+          writeTerminal('Usage: pip install package-name\r\n')
+          setOperationStatus('Add a package name after pip install.')
+          return
+        }
+
+        setLanguageStatus('Installing Python package...')
+        writeTerminal(`Installing Python packages: ${request.packages.join(', ')}\r\n`)
+        const micropipPackages = []
+        for (const packageName of request.packages) {
+          try {
+            await pyodide.loadPackage(packageName)
+          } catch {
+            micropipPackages.push(packageName)
+          }
+        }
+
+        if (micropipPackages.length > 0) {
+          await pyodide.loadPackage('micropip')
+          await pyodide.runPythonAsync(`
+import micropip
+await micropip.install(${JSON.stringify(micropipPackages)})
+`)
+        }
+        writeTerminal(`\x1b[32mInstalled ${request.packages.join(', ')} for Python.\x1b[0m\r\n`)
+        setLanguageStatus('Python packages ready')
+        setOperationStatus(`Installed Python package${request.packages.length === 1 ? '' : 's'}: ${request.packages.join(', ')}.`)
+        return
+      }
+
+      setLanguageStatus('Syncing workspace...')
+      await syncWorkspaceToPython(pyodide, webcontainer)
+      pyodide.FS.chdir(pythonWorkspaceRoot)
+
+      if (request.type === 'inline') {
+        if (!request.code) {
+          writeTerminal('Usage: python -c "print(123)"\r\n')
+          setOperationStatus('Add Python code after python -c.')
+          return
+        }
+
+        setLanguageStatus('Running Python...')
+        await pyodide.runPythonAsync(request.code)
+        writeTerminal('\x1b[2mPython inline command finished.\x1b[0m\r\n')
+        setLanguageStatus('Python ready')
+        setOperationStatus('Python inline command finished.')
+        return
+      }
+
+      if (request.type === 'file') {
+        const path = normalizePath(request.path)
+        if (activeTab?.path === path && activeTab.dirty) {
+          await saveActiveFile()
+          await syncWorkspaceToPython(pyodide, webcontainer)
+        } else {
+          await webcontainer.fs.readFile(path)
+        }
+
+        const fullPath = `${pythonWorkspaceRoot}/${path}`
+        const argv = [path, ...(request.args || [])]
+        setLanguageStatus('Running Python...')
+        setOperationStatus(`Running Python file: ${path}`)
+        await pyodide.runPythonAsync(`
+import os
+import runpy
+import sys
+
+workspace = ${JSON.stringify(pythonWorkspaceRoot)}
+target = ${JSON.stringify(fullPath)}
+script_dir = os.path.dirname(target)
+os.chdir(workspace)
+for entry in (workspace, script_dir):
+    if entry and entry not in sys.path:
+        sys.path.insert(0, entry)
+sys.argv = ${JSON.stringify(argv)}
+runpy.run_path(target, run_name="__main__")
+`)
+        writeTerminal(`\r\n\x1b[2mPython file ${path} finished.\x1b[0m\r\n`)
+        setLanguageStatus('Python ready')
+        setOperationStatus(`Finished Python file: ${path}`)
+      }
+    } catch (error) {
+      const message = error?.message || String(error)
+      writeTerminal(`\r\n\x1b[1;31mPython failed:\x1b[0m ${message}\r\n`)
+      addProblem('Python', message)
+      setLanguageStatus('Python error')
+      setOperationStatus(`Python failed: ${message}`)
+    }
+  }, [activeTab, addProblem, saveActiveFile, webcontainer, writeTerminal])
+
+  const handleWebTerminalCommand = useCallback(async (request, originalCommand) => {
+    setActiveActivity('commands')
+    setBottomPanelTab('terminal')
+    writeTerminal(`\r\n\x1b[1;35m$ ${originalCommand}\x1b[0m\r\n`)
+
+    if (request.action === 'create-python-sample') {
+      if (!webcontainer) {
+        setOperationStatus('The browser runtime is still starting. Try again in a moment.')
+        return
+      }
+
+      try {
+        await webcontainer.fs.writeFile(pythonSamplePath, pythonSampleSource)
+        await refreshExplorer(webcontainer)
+        await openFile(pythonSamplePath, webcontainer)
+        await saveCurrentSnapshot(webcontainer)
+        writeTerminal(`Created ${pythonSamplePath}. Run it with: python ${pythonSamplePath}\r\n`)
+        setOperationStatus(`Created ${pythonSamplePath}. Click Run File or run python ${pythonSamplePath}.`)
+      } catch (error) {
+        const message = error?.message || String(error)
+        writeTerminal(`Could not create Python sample: ${message}\r\n`)
+        setOperationStatus(`Could not create Python sample: ${message}`)
+      }
+      return
+    }
+
+    if (request.action === 'explain-runtime') {
+      const path = request.args?.[0] || 'this file'
+      writeTerminal([
+        `${path} can be edited and saved here, but it needs a browser-compatible runtime to execute.`,
+        'Real support is enabled for Node/npm, browser previews, shell scripts, and Python through Pyodide.',
+        'For languages like Java, C/C++, Rust, Go, Ruby, or PHP, upload a project that includes a JS/WASM runner or an npm script, then run that script.',
+      ].join('\r\n'))
+      writeTerminal('\r\n')
+      setOperationStatus(`No browser runtime is configured for ${path}.`)
+      return
+    }
+
+    writeTerminal('Unknown webterm command. Try webterm create-python-sample.\r\n')
+    setOperationStatus('Unknown webterm command.')
+  }, [openFile, refreshExplorer, saveCurrentSnapshot, webcontainer, writeTerminal])
+
   const runTerminalCommand = useCallback((command) => {
+    const pythonRequest = getPythonCommandRequest(command)
+    if (pythonRequest) {
+      runPythonRequest(pythonRequest, command)
+      return
+    }
+
+    const webTerminalRequest = getWebTerminalCommandRequest(command)
+    if (webTerminalRequest) {
+      handleWebTerminalCommand(webTerminalRequest, command)
+      return
+    }
+
     if (!terminalApiRef.current) {
       setOperationStatus('Terminal is still connecting. Try again in a moment.')
       return
@@ -2567,7 +3044,16 @@ export default function App() {
 
     terminalApiRef.current.run(command)
     setOperationStatus(`Running: ${command}`)
-  }, [])
+  }, [handleWebTerminalCommand, runPythonRequest])
+
+  const interceptTerminalCommand = useCallback((command) => {
+    if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command)) {
+      runTerminalCommand(command)
+      return true
+    }
+
+    return false
+  }, [runTerminalCommand])
 
   const restartTerminal = useCallback(() => {
     terminalApiRef.current?.kill()
@@ -3444,7 +3930,8 @@ export default function App() {
           await saveCurrentSnapshot(webcontainer, name)
         }
 
-        setOperationStatus(`Imported ${name}. Run npm install, then npm run dev or npm start.`)
+        setLayoutMode('all')
+        setOperationStatus(`Imported ${name}. Run npm scripts for web apps, or open a .py file and click Run File.`)
         writeTerminal(`\r\n\x1b[1;32mImported ${files.length} files into WebContainer.\x1b[0m\r\n`)
       } catch (error) {
         setOperationStatus(`Import failed: ${error.message}`)
@@ -3483,6 +3970,8 @@ export default function App() {
         body: { action: 'create', name, files: [] },
       })
       const project = projectFromApi(data.project)
+      setLayoutMode('all')
+      setIsSettingsOpen(false)
       loadedCloudProjectIdRef.current = ''
       setActiveCloudProject(project)
       setCloudProjects((projects) => [
@@ -4252,8 +4741,9 @@ export default function App() {
         <section className="editor-panel">
           {tree.length > 0 && showOnboarding ? (
             <div className="onboarding-strip">
-              <span>Next: install dependencies, run a script, then watch the preview connect automatically.</span>
+              <span>Next: run npm scripts for web apps, or open a Python file and use Run File.</span>
               <button type="button" onClick={() => runTerminalCommand('npm install')}>npm install</button>
+              <button type="button" onClick={runActiveFile} disabled={!activeTab}>Run File</button>
               <button type="button" onClick={() => startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start')}>
                 Run app
               </button>
@@ -4361,7 +4851,7 @@ export default function App() {
               </button>
             </div>
             <div className="terminal-actions">
-              <span>{isInstalling ? 'Installing packages' : 'Interactive jsh'}</span>
+              <span>{isInstalling ? 'Installing packages' : `Interactive jsh + ${languageStatus}`}</span>
               <button type="button" onClick={restartTerminal}>New</button>
               <button type="button" onClick={clearTerminal}>Clear</button>
               <button type="button" onClick={killTerminal}>Kill</button>
@@ -4371,7 +4861,7 @@ export default function App() {
             <div className="command-header">
               <div>
                 <strong>Command Deck</strong>
-                <span>{visibleCommands.length} real WebContainer commands</span>
+                <span>{visibleCommands.length} commands and language runners</span>
               </div>
               <input
                 ref={commandSearchRef}
@@ -4409,7 +4899,7 @@ export default function App() {
               </div>
             </div>
             <div className="command-note">
-              Windows commands are mapped to WebContainer shell equivalents because the browser runtime is not native Windows.
+              Windows commands are mapped to WebContainer shell equivalents. Python commands run through a real Pyodide runtime in the browser.
             </div>
           </div>
           <div className={`problems-panel ${bottomPanelTab === 'problems' ? 'is-active' : ''}`}>
@@ -4436,6 +4926,7 @@ export default function App() {
               webcontainer={webcontainer}
               onReady={handleTerminalReady}
               onOutput={inspectProcessOutput}
+              onInterceptCommand={interceptTerminalCommand}
             />
           </div>
         </section>
@@ -4471,12 +4962,12 @@ export default function App() {
             <iframe key={previewKey} title="WebContainer preview" src={previewUrl} />
           ) : (
             <div className="preview-placeholder">
-              <span>Waiting for a dev server. Try npm run dev, npm start, or any script that opens a browser port.</span>
+              <span>Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.</span>
             </div>
           )}
         </div>
         <div className="status-strip" title={operationStatus || bootStatus}>
-          {operationStatus || 'Commands and file edits run inside the WebContainer runtime.'}
+          {operationStatus || 'Commands run through WebContainer, with Python handled by the browser runtime.'}
         </div>
       </aside>
     </div>
