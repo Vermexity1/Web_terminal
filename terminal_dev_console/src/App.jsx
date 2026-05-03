@@ -444,6 +444,59 @@ const defaultModelsByProvider = Object.fromEntries(
   aiProviders.map((provider) => [provider.id, provider.models[0].id]),
 )
 
+const aiThinkingProfiles = {
+  fast: {
+    id: 'fast',
+    label: 'Fast',
+    description: 'Small context, quick plan, smallest patch.',
+    planContextLimit: 8,
+    planCharsPerFile: 7000,
+    patchCharsPerFile: 16000,
+    planOutputTokens: 900,
+    patchOutputTokens: 1400,
+    patchLimit: 8,
+    instruction: 'Optimize for speed. Only inspect the most likely files and avoid optional polish.',
+  },
+  balanced: {
+    id: 'balanced',
+    label: 'Balanced',
+    description: 'Good default for everyday coding.',
+    planContextLimit: 14,
+    planCharsPerFile: 10000,
+    patchCharsPerFile: 26000,
+    planOutputTokens: 1300,
+    patchOutputTokens: 2200,
+    patchLimit: 12,
+    instruction: 'Balance speed and care. Inspect enough context to avoid obvious regressions.',
+  },
+  deep: {
+    id: 'deep',
+    label: 'Deep',
+    description: 'More context, stronger review, safer edits.',
+    planContextLimit: 22,
+    planCharsPerFile: 14000,
+    patchCharsPerFile: 34000,
+    planOutputTokens: 1800,
+    patchOutputTokens: 3200,
+    patchLimit: 16,
+    instruction: 'Think like a senior coding agent. Inspect related files, name edge cases, and produce a conservative patch.',
+  },
+  max: {
+    id: 'max',
+    label: 'Max',
+    description: 'Largest local context and strictest self-review.',
+    planContextLimit: 34,
+    planCharsPerFile: 18000,
+    patchCharsPerFile: 44000,
+    planOutputTokens: 2600,
+    patchOutputTokens: 4600,
+    patchLimit: 20,
+    instruction: 'Use the strongest workflow. Read broad context, break the work into phases, and self-review for regressions before returning edits.',
+  },
+}
+
+const aiThinkingOptions = Object.values(aiThinkingProfiles)
+
 function todayUsageKey() {
   return new Date().toISOString().slice(0, 10)
 }
@@ -466,10 +519,11 @@ function defaultAiSettings() {
     customEndpoint: '',
     customModel: 'gpt-4o-mini',
     priceMode: 'free',
+    thinkingLevel: 'deep',
     dailyRequestLimit: 20,
     dailyTokenLimit: 50000,
     dailyBudgetUsd: 0,
-    maxOutputTokens: 1400,
+    maxOutputTokens: 3200,
   }
 }
 
@@ -492,6 +546,7 @@ function normalizeAiSettings(savedSettings) {
     models,
     customEndpoint: saved.customEndpoint || defaults.customEndpoint,
     customModel: saved.customModel || defaults.customModel,
+    thinkingLevel: aiThinkingProfiles[saved.thinkingLevel]?.id || defaults.thinkingLevel,
   }
 }
 
@@ -530,6 +585,17 @@ function getAiModel(settings) {
     inputPrice: 0,
     outputPrice: 0,
   }
+}
+
+function getAiThinkingProfile(level) {
+  return aiThinkingProfiles[level] || aiThinkingProfiles.deep
+}
+
+function getAiOutputTokens(settings, phase) {
+  const profile = getAiThinkingProfile(settings.thinkingLevel)
+  const requestedMax = Number(settings.maxOutputTokens) || defaultAiSettings().maxOutputTokens
+  const profileMax = phase === 'plan' ? profile.planOutputTokens : profile.patchOutputTokens
+  return Math.max(512, Math.min(requestedMax, profileMax))
 }
 
 function estimateAiCost(settings, inputTokens, outputTokens) {
@@ -696,7 +762,7 @@ function formatAiFileContext(fileContents = {}, maxCharsPerFile = 14000) {
     .join('\n\n')
 }
 
-function normalizeAiEdits(edits, plan, files) {
+function normalizeAiEdits(edits, plan, files, profile) {
   const workspacePaths = new Set(files.map((file) => file.path))
   const plannedPaths = new Set([
     ...(plan?.filesToRead || []),
@@ -727,10 +793,10 @@ function normalizeAiEdits(edits, plan, files) {
     normalized.push({ ...edit, path, content })
   }
 
-  return { edits: normalized.slice(0, 12), rejected }
+  return { edits: normalized.slice(0, profile.patchLimit), rejected }
 }
 
-function buildAiPlanPrompt({ userPrompt, activeTab, files, fileContents, frameworkName, projectName }) {
+function buildAiPlanPrompt({ userPrompt, activeTab, files, fileContents, frameworkName, projectName, thinkingProfile }) {
   const fileList = files.slice(0, 120).map((file) => file.path).join('\n')
   const activeFileBlock = activeTab
     ? `Active file: ${activeTab.path}\n\n${activeTab.contents.slice(0, 16000)}`
@@ -741,6 +807,8 @@ ${aiAgentRules}
 
 Project: ${projectName}
 Framework: ${frameworkName}
+Thinking level: ${thinkingProfile.label}
+Thinking behavior: ${thinkingProfile.instruction}
 
 Workspace files:
 ${fileList || '(empty workspace)'}
@@ -748,7 +816,7 @@ ${fileList || '(empty workspace)'}
 ${activeFileBlock}
 
 Relevant file context selected by the IDE:
-${formatAiFileContext(fileContents, 10000)}
+${formatAiFileContext(fileContents, thinkingProfile.planCharsPerFile)}
 
 User request:
 ${userPrompt}
@@ -773,12 +841,13 @@ Rules:
 - If the request is ambiguous or unsafe, ask questions and leave filesToEdit empty.
 - Only list files that exist in the workspace unless you intentionally plan to create them.
 - Include at least one verification command when the project has a package.json.
-- Be extra explicit because the patch step will follow this plan strictly.`
+- Be extra explicit because the patch step will follow this plan strictly.
+- For Deep or Max thinking, include likely edge cases and a short verification strategy.`
 }
 
-function buildAiPatchPrompt({ userPrompt, plan, activeTab, files, fileContents, frameworkName, projectName }) {
+function buildAiPatchPrompt({ userPrompt, plan, activeTab, files, fileContents, frameworkName, projectName, thinkingProfile }) {
   const fileList = files.slice(0, 160).map((file) => file.path).join('\n')
-  const contextBlock = formatAiFileContext(fileContents, 26000)
+  const contextBlock = formatAiFileContext(fileContents, thinkingProfile.patchCharsPerFile)
   const activeFileBlock = activeTab && !fileContents?.[activeTab.path]
     ? `--- ${activeTab.path}\n${activeTab.contents.slice(0, 18000)}`
     : ''
@@ -788,6 +857,8 @@ ${aiAgentRules}
 
 Project: ${projectName}
 Framework: ${frameworkName}
+Thinking level: ${thinkingProfile.label}
+Thinking behavior: ${thinkingProfile.instruction}
 
 Workspace files:
 ${fileList || '(empty workspace)'}
@@ -2086,7 +2157,8 @@ export default function App() {
     }
 
     const files = flattenTree(tree)
-    const contextPaths = selectAiContextPaths(files, request, activeTab?.path, 12)
+    const thinkingProfile = getAiThinkingProfile(aiSettings.thinkingLevel)
+    const contextPaths = selectAiContextPaths(files, request, activeTab?.path, thinkingProfile.planContextLimit)
     const contextContents = await readCurrentFileContents(contextPaths)
     const prompt = buildAiPlanPrompt({
       userPrompt: request,
@@ -2095,8 +2167,9 @@ export default function App() {
       fileContents: contextContents,
       frameworkName,
       projectName,
+      thinkingProfile,
     })
-    const estimatedOutputTokens = Math.min(Number(aiSettings.maxOutputTokens) || 1400, 1200)
+    const estimatedOutputTokens = getAiOutputTokens(aiSettings, 'plan')
     const budget = checkAiBudget(aiSettings, aiUsage, prompt, estimatedOutputTokens)
 
     if (budget.blockedMessage) {
@@ -2121,7 +2194,7 @@ export default function App() {
       {
         id: `assistant-working-${Date.now()}`,
         role: 'assistant',
-        content: `${provider.label} is thinking through the request, reading the visible workspace context, and drafting a plan before touching code...`,
+        content: `${provider.label} is using ${thinkingProfile.label} thinking: selecting context, planning target files, and drafting a safe plan before touching code...`,
         changes: [],
         status: 'working',
       },
@@ -2219,6 +2292,7 @@ export default function App() {
     }
 
     const files = flattenTree(tree)
+    const thinkingProfile = getAiThinkingProfile(aiSettings.thinkingLevel)
     const contextPaths = Array.from(new Set([
       ...(aiPlan.filesToRead || []),
       ...(aiPlan.filesToEdit || []),
@@ -2233,8 +2307,9 @@ export default function App() {
       fileContents,
       frameworkName,
       projectName,
+      thinkingProfile,
     })
-    const estimatedOutputTokens = Number(aiSettings.maxOutputTokens) || 1400
+    const estimatedOutputTokens = getAiOutputTokens(aiSettings, 'patch')
     const budget = checkAiBudget(aiSettings, aiUsage, prompt, estimatedOutputTokens)
 
     if (budget.blockedMessage) {
@@ -2250,7 +2325,7 @@ export default function App() {
       {
         id: `assistant-working-${Date.now()}`,
         role: 'assistant',
-        content: `${provider.label} is applying the plan to the relevant files and preparing a reviewable patch...`,
+        content: `${provider.label} is using ${thinkingProfile.label} thinking to apply the plan, validate paths, and prepare a reviewable patch...`,
         changes: [],
         status: 'working',
       },
@@ -2260,7 +2335,7 @@ export default function App() {
       const response = await requestAiCoder(aiSettings, prompt, estimatedOutputTokens)
       const text = response.text
       const parsed = parseAiJson(text)
-      const normalizedEdits = normalizeAiEdits(Array.isArray(parsed.edits) ? parsed.edits : [], aiPlan, files)
+      const normalizedEdits = normalizeAiEdits(Array.isArray(parsed.edits) ? parsed.edits : [], aiPlan, files, thinkingProfile)
       const edits = normalizedEdits.edits
       const existingContents = await readCurrentFileContents(edits.map((edit) => edit.path))
       const changeSet = summarizeChangeSet(edits, existingContents)
@@ -2469,27 +2544,47 @@ export default function App() {
     const startX = event.clientX
     const startY = event.clientY
     const startSizes = { ...layoutSizes }
+    const activityWidth = shellRect.width <= 1180 ? 44 : 46
+    const editorMin = shellRect.width <= 1180 ? 360 : 420
+    const previewMin = 320
+    const explorerMin = 210
+    const handleWidth = 6
+    const visiblePreview = layoutMode === 'all' || layoutMode === 'codePreview'
+    const visibleExplorer = layoutMode === 'all' || layoutMode === 'agentCode' || layoutMode === 'agentPreview'
+    const visibleWorkbench = layoutMode !== 'agentPreview'
+    const maxExplorer = visiblePreview
+      ? shellRect.width - activityWidth - editorMin - previewMin - handleWidth * 2
+      : shellRect.width - activityWidth - editorMin - handleWidth
+    const maxPreview = layoutMode === 'all'
+      ? shellRect.width - activityWidth - startSizes.explorer - editorMin - handleWidth * 2
+      : shellRect.width - activityWidth - editorMin - handleWidth
+    const maxTerminal = visibleWorkbench
+      ? Math.max(260, shellRect.height - 52 - 170 - handleWidth)
+      : 520
 
     const handlePointerMove = (moveEvent) => {
       setLayoutSizes((currentSizes) => {
         if (panel === 'explorer') {
           return {
             ...currentSizes,
-            explorer: clamp(startSizes.explorer + moveEvent.clientX - startX, 210, 380),
+            explorer: visibleExplorer
+              ? clamp(startSizes.explorer + moveEvent.clientX - startX, explorerMin, Math.max(explorerMin, maxExplorer))
+              : currentSizes.explorer,
           }
         }
 
         if (panel === 'preview') {
-          const maxPreview = Math.max(340, shellRect.width - startSizes.explorer - 560)
           return {
             ...currentSizes,
-            preview: clamp(startSizes.preview - (moveEvent.clientX - startX), 320, maxPreview),
+            preview: visiblePreview
+              ? clamp(startSizes.preview - (moveEvent.clientX - startX), previewMin, Math.max(previewMin, maxPreview))
+              : currentSizes.preview,
           }
         }
 
         return {
           ...currentSizes,
-          terminal: clamp(startSizes.terminal - (moveEvent.clientY - startY), 220, 520),
+          terminal: clamp(startSizes.terminal - (moveEvent.clientY - startY), 220, maxTerminal),
         }
       })
     }
@@ -2504,7 +2599,7 @@ export default function App() {
     document.body.classList.add('is-resizing')
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', stopResize)
-  }, [layoutSizes])
+  }, [layoutMode, layoutSizes])
 
   const updateActiveContents = useCallback((value = '') => {
     setTabs((currentTabs) =>
@@ -2756,7 +2851,10 @@ export default function App() {
       <div className="ai-agent-strip">
         <div>
           <strong>{aiUsageSummary.model.label}</strong>
-          <span>{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to plan' : 'API key needed in Settings'}</span>
+          <span>
+            {getAiThinkingProfile(aiSettings.thinkingLevel).label} thinking /
+            {' '}{aiSettings.apiKeys?.[aiSettings.provider] ? 'Ready to plan' : 'API key needed in Settings'}
+          </span>
         </div>
         <button type="button" onClick={() => setIsSettingsOpen(true)}>Settings</button>
       </div>
@@ -2974,6 +3072,17 @@ export default function App() {
                 <option value="paid">Paid estimate</option>
               </select>
             </label>
+            <label className="ai-wide">
+              Thinking level
+              <select
+                value={aiSettings.thinkingLevel}
+                onChange={(event) => setAiSettings((settings) => ({ ...settings, thinkingLevel: event.target.value }))}
+              >
+                {aiThinkingOptions.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.label} - {profile.description}</option>
+                ))}
+              </select>
+            </label>
           </div>
         </section>
 
@@ -3115,6 +3224,17 @@ export default function App() {
               }}
             >
               AI+Preview
+            </button>
+            <button
+              className={layoutMode === 'all' && !isSettingsOpen ? 'is-active' : ''}
+              type="button"
+              onClick={() => {
+                setLayoutMode('all')
+                setIsSettingsOpen(false)
+                setActiveActivity('preview')
+              }}
+            >
+              All
             </button>
           </div>
           <label className="toolbar-toggle">
