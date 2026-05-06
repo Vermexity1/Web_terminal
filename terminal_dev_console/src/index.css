@@ -1764,7 +1764,17 @@ button:disabled {
 .terminal-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+}
+
+.terminal-actions span {
+  min-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .terminal-actions button {
@@ -1963,6 +1973,8 @@ button:disabled {
   padding: 7px 8px;
   overflow: auto;
   scrollbar-gutter: stable;
+  scrollbar-color: #3b82f6 #05080d;
+  scrollbar-width: auto;
 }
 
 .problems-panel {
@@ -2073,10 +2085,32 @@ button:disabled {
 
 .terminal-host .xterm {
   height: 100%;
+  min-width: 100%;
 }
 
 .terminal-host .xterm-viewport {
-  overflow-y: auto !important;
+  overflow-y: scroll !important;
+  scrollbar-color: #3b82f6 #05080d;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+}
+
+.terminal-host::-webkit-scrollbar,
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.terminal-host::-webkit-scrollbar-track,
+.terminal-host .xterm-viewport::-webkit-scrollbar-track {
+  background: #05080d;
+}
+
+.terminal-host::-webkit-scrollbar-thumb,
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
+  border: 3px solid #05080d;
+  border-radius: 999px;
+  background: #3b82f6;
 }
 
 .terminal-host .xterm-screen {
@@ -2504,37 +2538,37 @@ button:disabled {
 .ai-chat-log {
   min-height: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  display: grid;
+  align-content: start;
+  justify-items: start;
   gap: 8px;
-  padding: 2px 2px 4px;
+  padding: 6px;
 }
 
 .ai-message {
   position: relative;
-  width: fit-content;
-  min-width: min(160px, 100%);
-  max-width: min(720px, 94%);
-  padding: 8px;
+  width: max-content;
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px 12px;
   border: 1px solid rgba(87, 107, 132, 0.22);
-  border-radius: 8px;
+  border-radius: 10px;
   background: rgba(10, 15, 24, 0.78);
   overflow: hidden;
   overflow-wrap: anywhere;
+  text-align: left;
   word-break: break-word;
 }
 
 .ai-message.is-user {
-  align-self: flex-end;
-  min-width: min(140px, 100%);
-  max-width: min(680px, 88%);
+  justify-self: end;
+  max-width: 100%;
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(20, 55, 104, 0.72);
 }
 
 .ai-message.is-assistant {
-  align-self: flex-start;
+  justify-self: start;
 }
 
 .ai-message.is-working {
@@ -2584,9 +2618,10 @@ button:disabled {
 
 .ai-message p {
   color: #dce8f8;
-  font-size: 0.74rem;
-  line-height: 1.45;
+  font-size: 0.78rem;
+  line-height: 1.5;
   overflow-wrap: anywhere;
+  text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
 }

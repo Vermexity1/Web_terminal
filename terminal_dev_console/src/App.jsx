@@ -1336,6 +1336,30 @@ function withTimeout(promise, timeoutMs, message) {
   return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId))
 }
 
+function stripAnsi(value) {
+  return String(value).replace(/\u001b\[[0-9;]*m/g, '')
+}
+
+function getPreviewSignalFromOutput(data) {
+  const text = stripAnsi(data)
+  const directUrl = text.match(/https?:\/\/[^\s"'<>]+webcontainer-api\.io[^\s"'<>]*/i)?.[0]
+  const localUrl = text.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[^\]]+\]|[a-z0-9.-]+):(\d+)[^\s"'<>]*/i)
+  const readyPort = text.match(/\b(?:port|localhost:|127\.0\.0\.1:|0\.0\.0\.0:)\s*:?(\d{2,5})\b/i)
+  const port = Number(localUrl?.[1] || readyPort?.[1] || 0)
+
+  return {
+    directUrl,
+    port: Number.isFinite(port) && port > 0 ? port : 0,
+  }
+}
+
+function getManagedNpmScript(command) {
+  const normalized = command.trim().replace(/\s+/g, ' ')
+  if (/^npm run dev$/i.test(normalized)) return 'dev'
+  if (/^npm run start$/i.test(normalized) || /^npm start$/i.test(normalized)) return 'start'
+  return ''
+}
+
 const joinPath = (base, name) => (base ? `${base}/${name}` : name)
 const parentPath = (path) => path.split('/').slice(0, -1).join('/')
 const baseName = (path) => path.split('/').filter(Boolean).pop() || ''
@@ -1830,6 +1854,18 @@ function TerminalPanel({ webcontainer, onReady, onOutput, onInterceptCommand }) 
         focus() {
           terminal.focus()
         },
+        scrollUp() {
+          terminal.scrollLines(-Math.max(8, Math.floor(terminal.rows * 0.85)))
+        },
+        scrollDown() {
+          terminal.scrollLines(Math.max(8, Math.floor(terminal.rows * 0.85)))
+        },
+        scrollToTop() {
+          terminal.scrollToTop()
+        },
+        scrollToBottom() {
+          terminal.scrollToBottom()
+        },
         kill() {
           shellProcess?.kill()
         },
@@ -2214,6 +2250,9 @@ export default function App() {
   const cloudSettingsTimerRef = useRef(null)
   const activeCloudProjectRef = useRef(null)
   const loadedCloudProjectIdRef = useRef('')
+  const previewUrlsByPortRef = useRef(new Map())
+  const activePreviewPortRef = useRef(0)
+  const pendingPreviewPortRef = useRef(0)
   const lastProblemRef = useRef('')
   const projectNameRef = useRef(projectName)
 
@@ -2227,7 +2266,7 @@ export default function App() {
   }, [])
 
   const addProblem = useCallback((source, message) => {
-    const cleanMessage = message.replace(/\u001b\[[0-9;]*m/g, '').trim()
+    const cleanMessage = stripAnsi(message).trim()
     if (!cleanMessage || cleanMessage.length < 4) return
 
     const signature = `${source}:${cleanMessage}`
@@ -2240,16 +2279,47 @@ export default function App() {
     ].slice(0, 8))
   }, [])
 
+  const connectPreview = useCallback((port, url, source = 'WebContainer') => {
+    if (!url) return
+    const safePort = Number(port) || 0
+
+    if (safePort) {
+      previewUrlsByPortRef.current.set(safePort, url)
+      activePreviewPortRef.current = safePort
+      pendingPreviewPortRef.current = 0
+    }
+
+    setPreviewUrl(url)
+    setPreviewKey((key) => key + 1)
+    setDevStatus(safePort ? `Running on ${safePort}` : 'Running')
+    setOperationStatus(`${source} preview connected${safePort ? ` on port ${safePort}` : ''}.`)
+  }, [])
+
   const inspectProcessOutput = useCallback((source, data) => {
     const text = String(data)
     const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
     const problemPattern = /\b(error|failed|exception|enoent|eaddrinuse|cannot find|syntaxerror|typeerror|referenceerror)\b/i
+    const previewSignal = getPreviewSignalFromOutput(text)
+
+    if (previewSignal.directUrl) {
+      connectPreview(previewSignal.port || activePreviewPortRef.current, previewSignal.directUrl, source)
+    } else if (previewSignal.port) {
+      const bridgedUrl = previewUrlsByPortRef.current.get(previewSignal.port)
+      if (bridgedUrl) {
+        connectPreview(previewSignal.port, bridgedUrl, source)
+      } else {
+        pendingPreviewPortRef.current = previewSignal.port
+        setDevStatus(`Server ready on ${previewSignal.port}`)
+        setOperationStatus(`Detected a dev server on port ${previewSignal.port}. Waiting for WebContainer's preview bridge...`)
+      }
+    }
+
     lines.forEach((line) => {
       if (problemPattern.test(line) && !/0 errors?/i.test(line)) {
         addProblem(source, line)
       }
     })
-  }, [addProblem])
+  }, [addProblem, connectPreview])
 
   const applyCloudSettings = useCallback((settings = {}) => {
     if (settings.theme) setTheme(settings.theme)
@@ -2461,6 +2531,21 @@ export default function App() {
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath), [activePath, tabs])
 
+  const getNpmServerArgs = useCallback((script) => {
+    const scriptHint = projectScripts.find((item) => item.command === `npm run ${script}`)?.hint || ''
+    const details = `${frameworkName} ${scriptHint}`.toLowerCase()
+
+    if (details.includes('vite')) {
+      return ['run', script, '--', '--host', '0.0.0.0', '--port', String(defaultRunPort)]
+    }
+
+    if (details.includes('next')) {
+      return ['run', script, '--', '--hostname', '0.0.0.0']
+    }
+
+    return ['run', script]
+  }, [frameworkName, projectScripts])
+
   const runProcess = useCallback(
     async (container, command, args, label) => {
       writeTerminal(`\r\n\x1b[1;36m$ ${[command, ...args].join(' ')}\x1b[0m\r\n`)
@@ -2491,8 +2576,12 @@ export default function App() {
       }
 
       setDevStatus('Starting')
-      writeTerminal(`\r\n\x1b[1;34mStarting npm run ${script}...\x1b[0m\r\n`)
-      const process = await container.spawn('npm', ['run', script])
+      setPreviewUrl('')
+      pendingPreviewPortRef.current = 0
+      activePreviewPortRef.current = 0
+      const npmArgs = getNpmServerArgs(script)
+      writeTerminal(`\r\n\x1b[1;34m$ npm ${npmArgs.join(' ')}\x1b[0m\r\n`)
+      const process = await container.spawn('npm', npmArgs)
       devProcessRef.current = process
       process.output.pipeTo(
         new WritableStream({
@@ -2509,7 +2598,7 @@ export default function App() {
         }
       })
     },
-    [inspectProcessOutput, webcontainer, writeTerminal],
+    [getNpmServerArgs, inspectProcessOutput, webcontainer, writeTerminal],
   )
 
   const stopDevServer = useCallback(() => {
@@ -2520,11 +2609,45 @@ export default function App() {
     setDevStatus('Stopped')
   }, [writeTerminal])
 
+  const saveAllDirtyTabs = useCallback(async (options = {}) => {
+    if (!webcontainer) return 0
+
+    const dirtyTabs = tabs.filter((tab) => tab.dirty)
+    if (!dirtyTabs.length) return 0
+
+    await Promise.all(dirtyTabs.map(async (tab) => {
+      const dir = parentPath(tab.path)
+      if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
+      await webcontainer.fs.writeFile(tab.path, tab.contents)
+    }))
+
+    const dirtyPaths = new Set(dirtyTabs.map((tab) => tab.path))
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        dirtyPaths.has(tab.path)
+          ? { ...tab, savedContents: tab.contents, dirty: false }
+          : tab,
+      ),
+    )
+
+    await refreshExplorer(webcontainer)
+    if (dirtyPaths.has('package.json')) await detectProjectDetails(webcontainer)
+    await saveCurrentSnapshot(webcontainer)
+    setPreviewKey((key) => key + 1)
+
+    if (!options.silent) {
+      setOperationStatus(`Autosaved ${dirtyTabs.length} open file${dirtyTabs.length === 1 ? '' : 's'}.`)
+    }
+
+    return dirtyTabs.length
+  }, [detectProjectDetails, refreshExplorer, saveCurrentSnapshot, tabs, webcontainer])
+
   const returnToProjectHub = useCallback(async () => {
     stopDevServer()
     if (webcontainer && activeCloudProject?.id) {
       try {
         setProjectHubStatus('Saving project before switching...')
+        await saveAllDirtyTabs({ silent: true })
         const files = await readWorkspaceFiles(webcontainer)
         await apiRequest('/api/projects', {
           method: 'POST',
@@ -2544,10 +2667,12 @@ export default function App() {
     loadedCloudProjectIdRef.current = ''
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
-  }, [activeCloudProject, loadCloudProjects, stopDevServer, webcontainer])
+  }, [activeCloudProject, loadCloudProjects, saveAllDirtyTabs, stopDevServer, webcontainer])
 
   const saveActiveFile = useCallback(async () => {
     if (!webcontainer || !activeTab) return
+    const dir = parentPath(activeTab.path)
+    if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
     await webcontainer.fs.writeFile(activeTab.path, activeTab.contents)
     setTabs((currentTabs) =>
       currentTabs.map((tab) =>
@@ -2571,15 +2696,34 @@ export default function App() {
     projectNameRef.current = projectName
   }, [projectName])
 
+  const dirtyTabsSignature = useMemo(
+    () => tabs.filter((tab) => tab.dirty).map((tab) => `${tab.path}:${tab.contents}`).join('\n---dirty-tab---\n'),
+    [tabs],
+  )
+
   useEffect(() => {
-    if (!autosaveEnabled || !activeTab?.dirty) return undefined
+    if (!autosaveEnabled || !dirtyTabsSignature) return undefined
 
     const timer = window.setTimeout(() => {
-      saveActiveRef.current?.()
-    }, 900)
+      saveAllDirtyTabs({ silent: true }).catch((error) => {
+        setOperationStatus(`Autosave failed: ${error.message}`)
+        addProblem('Autosave', error.message)
+      })
+    }, 350)
 
     return () => window.clearTimeout(timer)
-  }, [activeTab?.contents, activeTab?.dirty, autosaveEnabled])
+  }, [addProblem, autosaveEnabled, dirtyTabsSignature, saveAllDirtyTabs])
+
+  useEffect(() => {
+    const flushBeforeHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        saveAllDirtyTabs({ silent: true }).catch(() => {})
+      }
+    }
+
+    document.addEventListener('visibilitychange', flushBeforeHidden)
+    return () => document.removeEventListener('visibilitychange', flushBeforeHidden)
+  }, [saveAllDirtyTabs])
 
   useEffect(() => {
     localStorage.setItem('ide-autosave', String(autosaveEnabled))
@@ -2679,6 +2823,7 @@ export default function App() {
 
   useEffect(() => {
     const stopProcessesOnLeave = () => {
+      saveAllDirtyTabs({ silent: true }).catch(() => {})
       devProcessRef.current?.kill()
       devProcessRef.current = null
       try {
@@ -2695,7 +2840,7 @@ export default function App() {
       window.removeEventListener('pagehide', stopProcessesOnLeave)
       window.removeEventListener('beforeunload', stopProcessesOnLeave)
     }
-  }, [webcontainer])
+  }, [saveAllDirtyTabs, webcontainer])
 
   useEffect(() => {
     const cleanupBoot = () => {
@@ -2748,18 +2893,21 @@ export default function App() {
         setBootStatus('Connecting runtime services...')
 
         unsubscribeServer = container.on('server-ready', (port, url) => {
-          setPreviewUrl(url)
-          setPreviewKey((key) => key + 1)
-          setDevStatus(`Running on ${port}`)
+          connectPreview(port, url, 'WebContainer')
         })
         unsubscribePort = container.on('port', (port, type, url) => {
           if (type === 'open') {
-            setPreviewUrl(url)
-            setPreviewKey((key) => key + 1)
-            setDevStatus(`Running on ${port}`)
+            previewUrlsByPortRef.current.set(Number(port), url)
+            if (!activePreviewPortRef.current || pendingPreviewPortRef.current === Number(port)) {
+              connectPreview(port, url, 'WebContainer')
+            }
           } else {
-            setPreviewUrl('')
-            setDevStatus('Stopped')
+            previewUrlsByPortRef.current.delete(Number(port))
+            if (activePreviewPortRef.current === Number(port)) {
+              activePreviewPortRef.current = 0
+              setPreviewUrl('')
+              setDevStatus('Stopped')
+            }
           }
         })
         unsubscribeError = container.on('error', (error) => {
@@ -3126,6 +3274,12 @@ runpy.run_path(target, run_name="__main__")
       return
     }
 
+    const managedNpmScript = getManagedNpmScript(command)
+    if (managedNpmScript) {
+      startDevServer(undefined, managedNpmScript)
+      return
+    }
+
     if (!terminalApiRef.current) {
       setOperationStatus('Terminal is still connecting. Try again in a moment.')
       return
@@ -3133,10 +3287,10 @@ runpy.run_path(target, run_name="__main__")
 
     terminalApiRef.current.run(command)
     setOperationStatus(`Running: ${command}`)
-  }, [handleWebTerminalCommand, runPythonRequest])
+  }, [handleWebTerminalCommand, runPythonRequest, startDevServer])
 
   const interceptTerminalCommand = useCallback((command) => {
-    if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command)) {
+    if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command) || getManagedNpmScript(command)) {
       runTerminalCommand(command)
       return true
     }
@@ -3161,6 +3315,13 @@ runpy.run_path(target, run_name="__main__")
   const clearTerminal = useCallback(() => {
     terminalApiRef.current?.run('clear')
     setOperationStatus('Terminal cleared.')
+  }, [])
+
+  const scrollTerminal = useCallback((direction) => {
+    if (direction === 'top') terminalApiRef.current?.scrollToTop?.()
+    if (direction === 'up') terminalApiRef.current?.scrollUp?.()
+    if (direction === 'down') terminalApiRef.current?.scrollDown?.()
+    if (direction === 'bottom') terminalApiRef.current?.scrollToBottom?.()
   }, [])
 
   const exportProject = useCallback(async () => {
@@ -3904,6 +4065,11 @@ runpy.run_path(target, run_name="__main__")
 
   const closeTab = useCallback((path, event) => {
     event.stopPropagation()
+    if (tabs.some((tab) => tab.path === path && tab.dirty)) {
+      saveAllDirtyTabs({ silent: true }).catch((error) => {
+        setOperationStatus(`Could not save before closing ${path}: ${error.message}`)
+      })
+    }
     setTabs((currentTabs) => {
       const nextTabs = currentTabs.filter((tab) => tab.path !== path)
       if (path === activePath) {
@@ -3913,7 +4079,7 @@ runpy.run_path(target, run_name="__main__")
       }
       return nextTabs
     })
-  }, [activePath])
+  }, [activePath, saveAllDirtyTabs, tabs])
 
   const createEntry = useCallback(
     async (kind) => {
@@ -4963,6 +5129,10 @@ runpy.run_path(target, run_name="__main__")
             </div>
             <div className="terminal-actions">
               <span>{isInstalling ? 'Installing packages' : `Interactive jsh + ${languageStatus}`}</span>
+              <button type="button" onClick={() => scrollTerminal('top')}>Top</button>
+              <button type="button" onClick={() => scrollTerminal('up')}>Up</button>
+              <button type="button" onClick={() => scrollTerminal('down')}>Down</button>
+              <button type="button" onClick={() => scrollTerminal('bottom')}>Bottom</button>
               <button type="button" onClick={restartTerminal}>New</button>
               <button type="button" onClick={clearTerminal}>Clear</button>
               <button type="button" onClick={killTerminal}>Kill</button>
