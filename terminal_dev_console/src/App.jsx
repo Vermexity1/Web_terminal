@@ -3722,6 +3722,7 @@ runpy.run_path(target, run_name="__main__")
 
     let files = activeCloudProject.files || []
     const previousSandboxId = cloudRunner.sandboxId
+    const useStoredFiles = !webcontainer
     setActiveActivity('preview')
     setBottomPanelTab('terminal')
     setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...', diagnostics: null }))
@@ -3752,6 +3753,7 @@ runpy.run_path(target, run_name="__main__")
         projectId: activeCloudProject.id,
         command,
         files: filesForApi(files),
+        useStoredFiles,
         port: defaultRunPort,
         install: true,
       }
@@ -5332,6 +5334,7 @@ runpy.run_path(target, run_name="__main__")
     ['Preview mode', cloudDiagnostics.mode || (cloudRunner.previewUrl ? 'preview-proxy' : 'not started')],
     ['Preview URL', cloudRunner.previewUrl || 'not available'],
     ['Public preview host', cloudDiagnostics.previewHost || 'not available'],
+    ['File source', cloudDiagnostics.fileSource || 'not available'],
     ['Proxy port', cloudDiagnostics.proxyPort || 'not available'],
     ['App port', cloudDiagnostics.targetPort || 'not available'],
     ['Command', cloudDiagnostics.command || 'not started'],

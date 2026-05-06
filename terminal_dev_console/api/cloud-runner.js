@@ -368,8 +368,30 @@ async function saveRepairedProjectFiles(user, projectId, files) {
   return Boolean(result.saved)
 }
 
+async function readProjectFilesForRunner(user, projectId) {
+  if (!user?.id || !projectId) return []
+
+  const result = await updateStore((store) => {
+    const project = store.projects[String(projectId)]
+    if (!project || project.userId !== user.id) return { files: [] }
+
+    project.lastOpenedAt = Date.now()
+    return { files: sanitizeFiles(project.files || []) }
+  })
+
+  return result.files || []
+}
+
 function hasScript(packageJson, script) {
   return Boolean(packageJson?.scripts?.[script])
+}
+
+function hasDependency(packageJson, dependencyName) {
+  return Boolean(
+    packageJson?.dependencies?.[dependencyName]
+      || packageJson?.devDependencies?.[dependencyName]
+      || packageJson?.peerDependencies?.[dependencyName],
+  )
 }
 
 function firstPythonFile(files) {
@@ -454,11 +476,29 @@ async function commandOutput(result) {
   return `${stdout || ''}${stderr || ''}`
 }
 
-async function runBuildCheck(sandbox, logs) {
-  logs.push('$ npm run build (compile check)')
+function compileCheckCommand(files) {
+  const packageJson = packageJsonFromFiles(files)
+  if (!packageJson) return null
+  if (hasScript(packageJson, 'build')) return { cmd: 'npm', args: ['run', 'build'], label: 'npm run build' }
+
+  const looksLikeViteProject = hasDependency(packageJson, 'vite')
+    || files.some((file) => file.path === 'index.html')
+  if (looksLikeViteProject) return { cmd: 'npx', args: ['vite', 'build'], label: 'npx vite build' }
+
+  return null
+}
+
+async function runBuildCheck(sandbox, logs, files) {
+  const compileCommand = compileCheckCommand(files)
+  if (!compileCommand) {
+    logs.push('Compile check skipped: no build script or Vite project detected.')
+    return { exitCode: 0, output: '', skipped: true }
+  }
+
+  logs.push(`$ ${compileCommand.label} (compile check)`)
   const result = await sandbox.runCommand({
-    cmd: 'npm',
-    args: ['run', 'build'],
+    cmd: compileCommand.cmd,
+    args: compileCommand.args,
     cwd: appRoot,
     env: { NODE_ENV: 'development' },
   })
@@ -468,7 +508,12 @@ async function runBuildCheck(sandbox, logs) {
 }
 
 async function startRunner(body, user) {
-  let repairResult = repairCommonJsxMistakes(sanitizeFiles(body.files || []))
+  const clientFiles = sanitizeFiles(body.files || [])
+  const storedFiles = body.useStoredFiles
+    ? await readProjectFilesForRunner(user, body.projectId).catch(() => [])
+    : []
+  const sourceFiles = storedFiles.length ? storedFiles : clientFiles
+  let repairResult = repairCommonJsxMistakes(sourceFiles)
   let files = repairResult.files
   const repairs = [...repairResult.repairs]
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
@@ -500,6 +545,7 @@ async function startRunner(body, user) {
     runtime: body.runtime || chooseRuntime(files, requestedCommand),
     command,
     requestedCommand,
+    fileSource: storedFiles.length ? 'project-store' : 'browser-upload',
     targetPort,
     proxyPort,
     previewUrl: serverCommand ? sandbox.domain(proxyPort) : '',
@@ -541,12 +587,13 @@ async function startRunner(body, user) {
     }
   }
 
-  const packageJson = packageJsonFromFiles(files)
-  if (serverCommand && body.verify !== false && hasScript(packageJson, 'build')) {
-    const buildCheck = await runBuildCheck(sandbox, logs)
-    diagnostics.compileCheck = buildCheck.exitCode === 0 ? 'passed' : 'failed'
+  if (serverCommand && body.verify !== false) {
+    const buildCheck = await runBuildCheck(sandbox, logs, files)
+    diagnostics.compileCheck = buildCheck.skipped
+      ? 'skipped'
+      : (buildCheck.exitCode === 0 ? 'passed' : 'failed')
 
-    if (buildCheck.exitCode !== 0) {
+    if (!buildCheck.skipped && buildCheck.exitCode !== 0) {
       const locationRepair = repairJsxFromErrorLocation(files, buildCheck.output)
       if (locationRepair.repairs.length) {
         files = locationRepair.files
@@ -558,7 +605,7 @@ async function startRunner(body, user) {
           content: fileContent(file),
         })))
 
-        const retryBuildCheck = await runBuildCheck(sandbox, logs)
+        const retryBuildCheck = await runBuildCheck(sandbox, logs, files)
         diagnostics.compileCheck = retryBuildCheck.exitCode === 0 ? 'repaired' : 'failed after repair'
         if (retryBuildCheck.exitCode !== 0 && parseBabelUnexpectedToken(retryBuildCheck.output)) {
           await sandbox.stop({ blocking: false }).catch(() => {})
@@ -568,7 +615,14 @@ async function startRunner(body, user) {
           })
         }
       } else {
-        logs.push('Compile check failed, but no safe JSX auto-repair matched the error. Starting dev server so the overlay can show the exact issue.')
+        logs.push('Compile check failed, but no safe JSX auto-repair matched the error.')
+        if (parseBabelUnexpectedToken(buildCheck.output)) {
+          await sandbox.stop({ blocking: false }).catch(() => {})
+          throw Object.assign(new Error('Vite found a JSX syntax error that could not be auto-repaired safely.'), {
+            status: 500,
+            details: logs.join('\n'),
+          })
+        }
       }
     }
   }
@@ -578,6 +632,14 @@ async function startRunner(body, user) {
     diagnostics.repairsPersisted = repairsPersisted
     logs.push(repairsPersisted ? 'Auto repair saved back to the project.' : 'Auto repair used for this run only.')
   }
+  console.log('[cloud-runner] start diagnostics', {
+    sandboxId: sandbox.sandboxId,
+    fileSource: diagnostics.fileSource,
+    compileCheck: diagnostics.compileCheck,
+    repairs: repairs.length,
+    repairsPersisted,
+    command,
+  })
 
   let proxyCommandId = ''
   if (serverCommand) {
@@ -725,6 +787,11 @@ export default async function handler(req, res) {
 
     json(res, 400, { error: 'Unknown cloud runner action.' })
   } catch (error) {
+    console.error('[cloud-runner] request failed', {
+      message: error.message || 'Cloud runner failed.',
+      status: error.status || 500,
+      details: error.details ? String(error.details).slice(-2000) : '',
+    })
     json(res, error.status || 500, {
       error: error.message || 'Cloud runner failed.',
       details: error.details || '',
