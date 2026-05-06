@@ -3731,7 +3731,7 @@ runpy.run_path(target, run_name="__main__")
 
     let files = activeCloudProject.files || []
     const previousSandboxId = cloudRunner.sandboxId
-    const useStoredFiles = !webcontainer
+    const useStoredFiles = options.useStoredFiles ?? options.openInNewTab ?? !webcontainer
     let previewWindow = null
 
     if (options.openInNewTab) {
@@ -3800,6 +3800,32 @@ runpy.run_path(target, run_name="__main__")
 
       if (!files.length) {
         throw new Error('Cloud Runner needs project files. Upload a folder or load the demo first.')
+      }
+
+      if (useStoredFiles) {
+        const data = await apiRequest('/api/projects', {
+          method: 'POST',
+          body: {
+            action: 'save',
+            id: activeCloudProject.id,
+            name: projectNameRef.current || activeCloudProject.name,
+            files: filesForApi(files),
+          },
+        })
+        const project = projectFromApi(data.project)
+        activeCloudProjectRef.current = project
+        setActiveCloudProject(project)
+        setCloudProjects((projects) => {
+          const summary = {
+            id: project.id,
+            name: project.name,
+            fileCount: project.files?.length || 0,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+            lastOpenedAt: project.lastOpenedAt,
+          }
+          return [summary, ...projects.filter((item) => item.id !== project.id)]
+        })
       }
 
       const body = {

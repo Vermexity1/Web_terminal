@@ -531,6 +531,33 @@ function restoreRecoveredReactEntries(files) {
   return { files: nextFiles, repairs }
 }
 
+function hasRecoveryReactEntry(files) {
+  return files.some((file) => (
+    /src\/App\.(jsx|tsx)$/i.test(file.path || '')
+      && isRecoveryReactSource(fileContent(file).toString('utf8'))
+  ))
+}
+
+function chooseRunnerSourceFiles(clientFiles, storedFiles, preferStoredFiles) {
+  if (preferStoredFiles && storedFiles.length) {
+    return { files: storedFiles, source: 'project-store' }
+  }
+
+  if (clientFiles.length && hasRecoveryReactEntry(clientFiles) && storedFiles.length) {
+    return { files: storedFiles, source: 'project-store-restored' }
+  }
+
+  if (clientFiles.length) {
+    return { files: clientFiles, source: 'browser-upload' }
+  }
+
+  if (storedFiles.length) {
+    return { files: storedFiles, source: 'project-store' }
+  }
+
+  return { files: [], source: 'empty' }
+}
+
 export function recoverBrokenReactEntry(files, output) {
   const errorLocation = parseBabelUnexpectedToken(output)
   const repairs = []
@@ -810,11 +837,11 @@ async function runBuildCheck(sandbox, logs, files) {
 
 async function startRunner(body, user) {
   const clientFiles = sanitizeFiles(body.files || [])
-  const storedFiles = body.useStoredFiles
+  const storedFiles = body.projectId
     ? await readProjectFilesForRunner(user, body.projectId).catch(() => [])
     : []
-  const sourceFiles = storedFiles.length ? storedFiles : clientFiles
-  const restoreResult = restoreRecoveredReactEntries(sourceFiles)
+  const chosenSource = chooseRunnerSourceFiles(clientFiles, storedFiles, Boolean(body.useStoredFiles))
+  const restoreResult = restoreRecoveredReactEntries(chosenSource.files)
   let repairResult = repairCommonJsxMistakes(restoreResult.files)
   let files = repairResult.files
   const repairs = [...restoreResult.repairs, ...repairResult.repairs]
@@ -828,6 +855,7 @@ async function startRunner(body, user) {
   const requestedCommand = String(body.command || '').trim()
   const command = defaultCommand(files, requestedCommand, targetPort)
   const serverCommand = isServerCommand(command, requestedCommand)
+  const allowRecoveryFallback = body.allowRecoveryFallback === true
   const sandbox = await Sandbox.create({
     runtime: body.runtime || chooseRuntime(files, requestedCommand),
     ports: [proxyPort],
@@ -847,7 +875,7 @@ async function startRunner(body, user) {
     runtime: body.runtime || chooseRuntime(files, requestedCommand),
     command,
     requestedCommand,
-    fileSource: storedFiles.length ? 'project-store' : 'browser-upload',
+    fileSource: chosenSource.source,
     targetPort,
     proxyPort,
     previewUrl: serverCommand ? sandbox.domain(proxyPort) : '',
@@ -856,6 +884,7 @@ async function startRunner(body, user) {
     repairs,
     repairsPersisted,
     compileCheck: 'not run',
+    recoveryFallbackAllowed: allowRecoveryFallback,
   }
 
   for (const dir of directoryPaths(files)) {
@@ -917,8 +946,14 @@ async function startRunner(body, user) {
       }
 
       if (buildCheck.exitCode !== 0 && parseBabelUnexpectedToken(buildCheck.output)) {
-        const recovery = recoverBrokenReactEntry(files, buildCheck.output)
-        if (recovery.repairs.length) {
+        if (!allowRecoveryFallback) {
+          logs.push('Recovery fallback skipped: Cloud Run keeps the real project files instead of replacing src/App.jsx with a placeholder.')
+        }
+
+        const recovery = allowRecoveryFallback
+          ? recoverBrokenReactEntry(files, buildCheck.output)
+          : { files, repairs: [] }
+        if (allowRecoveryFallback && recovery.repairs.length) {
           files = recovery.files
           repairs.push(...recovery.repairs)
           diagnostics.repairs = repairs
