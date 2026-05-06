@@ -2279,14 +2279,16 @@ function ProjectHub({ user, projects, newProjectName, status, onProjectNameChang
           <strong>Saved Projects</strong>
           <span>{projects.length} total</span>
         </div>
-        {projects.length ? projects.map((project) => (
-          <button type="button" key={project.id} onClick={() => onOpenProject(project.id)}>
-            <span>{project.name}</span>
-            <small>{project.fileCount || 0} files saved</small>
-          </button>
-        )) : (
-          <p>No projects yet. Create one to enter the IDE.</p>
-        )}
+        <div className="project-scroll-menu" role="menu" aria-label="Project menu">
+          {projects.length ? projects.map((project) => (
+            <button type="button" role="menuitem" key={project.id} onClick={() => onOpenProject(project.id)}>
+              <span>{project.name}</span>
+              <small>{project.fileCount || 0} files saved</small>
+            </button>
+          )) : (
+            <p>No projects yet. Create one to enter the IDE.</p>
+          )}
+        </div>
       </section>
       {status ? <p className="project-status">{status}</p> : null}
     </main>
@@ -2379,6 +2381,7 @@ export default function App() {
   const previewPanelRef = useRef(null)
   const previewIframeRef = useRef(null)
   const commandSearchRef = useRef(null)
+  const aiChatLogRef = useRef(null)
   const saveSnapshotTimerRef = useRef(null)
   const cloudSettingsTimerRef = useRef(null)
   const activeCloudProjectRef = useRef(null)
@@ -2963,6 +2966,12 @@ export default function App() {
       setHasSavedProject(Boolean(snapshot?.files?.length))
     })
   }, [])
+
+  useEffect(() => {
+    const log = aiChatLogRef.current
+    if (!log) return
+    log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' })
+  }, [aiMessages.length, aiRunPhase])
 
   useEffect(() => {
     return () => {
@@ -4608,7 +4617,7 @@ runpy.run_path(target, run_name="__main__")
         <span>${aiUsageSummary.estimatedCostUsd.toFixed(4)} spent</span>
       </div>
 
-      <div className="ai-chat-log" aria-live="polite">
+      <div className="ai-chat-log" ref={aiChatLogRef} aria-live="polite">
         {aiMessages.map((message) => (
           <article
             className={`ai-message is-${message.role} ${message.status ? `is-${message.status}` : ''} ${message.phase ? `phase-${message.phase}` : ''}`}
