@@ -86,19 +86,106 @@ function fileContent(file) {
   return Buffer.from(String(file.data || ''), 'utf8')
 }
 
-function repairCommonJsxMistakes(files) {
+const jsxStylePropertyNames = [
+  'alignItems',
+  'background',
+  'backgroundColor',
+  'border',
+  'borderColor',
+  'borderRadius',
+  'boxShadow',
+  'color',
+  'cursor',
+  'display',
+  'flex',
+  'flexDirection',
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'gap',
+  'height',
+  'justifyContent',
+  'lineHeight',
+  'margin',
+  'marginBottom',
+  'marginLeft',
+  'marginRight',
+  'marginTop',
+  'maxHeight',
+  'maxWidth',
+  'minHeight',
+  'minWidth',
+  'opacity',
+  'overflow',
+  'padding',
+  'paddingBottom',
+  'paddingLeft',
+  'paddingRight',
+  'paddingTop',
+  'position',
+  'textAlign',
+  'transform',
+  'transition',
+  'width',
+]
+
+const jsxStylePropertyPattern = new RegExp(`\\b(${jsxStylePropertyNames.join('|')})\\s*:`)
+
+function rememberRepair(repairs, repair) {
+  repairs.push(repair)
+}
+
+function repairBareJsxStyleBlocks(source, filePath, repairs) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const lines = source.split(/\r?\n/)
+  let changed = false
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== '{{') continue
+
+    let closeIndex = -1
+    for (let cursor = index + 1; cursor < Math.min(lines.length, index + 60); cursor += 1) {
+      const trimmed = lines[cursor].trim()
+      if (trimmed === '}}') {
+        closeIndex = cursor
+        break
+      }
+      if (/^[<>]/.test(trimmed)) break
+    }
+
+    if (closeIndex === -1) continue
+
+    const body = lines.slice(index + 1, closeIndex).join('\n')
+    if (!jsxStylePropertyPattern.test(body)) continue
+
+    const indent = lines[index].match(/^\s*/)?.[0] || ''
+    lines[index] = `${indent}style={{`
+    changed = true
+    rememberRepair(repairs, {
+      path: filePath,
+      line: index + 1,
+      message: 'Added missing style= before a JSX style object.',
+    })
+    index = closeIndex
+  }
+
+  return changed ? lines.join(newline) : source
+}
+
+export function repairCommonJsxMistakes(files) {
   const repairs = []
-  const styleNames = /\b(background|border|borderRadius|boxShadow|color|cursor|display|fontFamily|fontSize|fontWeight|gap|height|justifyContent|lineHeight|margin|marginTop|maxWidth|minHeight|padding|textAlign|width)\s*:/
 
   const repairedFiles = files.map((file) => {
     if (!/\.(jsx|tsx)$/i.test(file.path || '')) return file
 
     const original = fileContent(file).toString('utf8')
-    let repaired = original.replace(
+    let repaired = repairBareJsxStyleBlocks(original, file.path, repairs)
+
+    repaired = repaired.replace(
       /(^[ \t]*)\{\{\s*\r?\n((?:[ \t]+[A-Za-z_$][\w$]*\s*:\s*[^;\n]+,?\s*\r?\n){2,})(^[ \t]*)\}\}/gm,
       (match, indent, body, closeIndent) => {
-        if (!styleNames.test(body)) return match
-        repairs.push({
+        if (!jsxStylePropertyPattern.test(body)) return match
+        rememberRepair(repairs, {
           path: file.path,
           message: 'Converted a bare JSX style object into a style prop.',
         })
@@ -107,7 +194,7 @@ function repairCommonJsxMistakes(files) {
     )
 
     repaired = repaired.replace(/\bstyle\s*\{\{/g, () => {
-      repairs.push({
+      rememberRepair(repairs, {
         path: file.path,
         message: 'Fixed style{{ to style={{.',
       })
@@ -120,7 +207,11 @@ function repairCommonJsxMistakes(files) {
   })
 
   const uniqueRepairs = repairs.filter((repair, index) => (
-    repairs.findIndex((item) => item.path === repair.path && item.message === repair.message) === index
+    repairs.findIndex((item) => (
+      item.path === repair.path
+        && item.message === repair.message
+        && item.line === repair.line
+    )) === index
   ))
 
   return { files: repairedFiles, repairs: uniqueRepairs }

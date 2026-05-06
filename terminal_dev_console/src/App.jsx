@@ -5867,7 +5867,9 @@ runpy.run_path(target, run_name="__main__")
               {cloudDiagnostics.repairs?.length ? (
                 <div className="troubleshoot-repairs">
                   {cloudDiagnostics.repairs.map((repair) => (
-                    <span key={`${repair.path}-${repair.message}`}>{repair.path}: {repair.message}</span>
+                    <span key={`${repair.path}-${repair.line || 0}-${repair.message}`}>
+                      {repair.path}{repair.line ? `:${repair.line}` : ''}: {repair.message}
+                    </span>
                   ))}
                 </div>
               ) : null}
