@@ -86,6 +86,46 @@ function fileContent(file) {
   return Buffer.from(String(file.data || ''), 'utf8')
 }
 
+function repairCommonJsxMistakes(files) {
+  const repairs = []
+  const styleNames = /\b(background|border|borderRadius|boxShadow|color|cursor|display|fontFamily|fontSize|fontWeight|gap|height|justifyContent|lineHeight|margin|marginTop|maxWidth|minHeight|padding|textAlign|width)\s*:/
+
+  const repairedFiles = files.map((file) => {
+    if (!/\.(jsx|tsx)$/i.test(file.path || '')) return file
+
+    const original = fileContent(file).toString('utf8')
+    let repaired = original.replace(
+      /(^[ \t]*)\{\{\s*\r?\n((?:[ \t]+[A-Za-z_$][\w$]*\s*:\s*[^;\n]+,?\s*\r?\n){2,})(^[ \t]*)\}\}/gm,
+      (match, indent, body, closeIndent) => {
+        if (!styleNames.test(body)) return match
+        repairs.push({
+          path: file.path,
+          message: 'Converted a bare JSX style object into a style prop.',
+        })
+        return `${indent}style={{\n${body}${closeIndent}}}`
+      },
+    )
+
+    repaired = repaired.replace(/\bstyle\s*\{\{/g, () => {
+      repairs.push({
+        path: file.path,
+        message: 'Fixed style{{ to style={{.',
+      })
+      return 'style={{'
+    })
+
+    return repaired === original
+      ? file
+      : { ...file, data: repaired, encoding: 'utf8' }
+  })
+
+  const uniqueRepairs = repairs.filter((repair, index) => (
+    repairs.findIndex((item) => item.path === repair.path && item.message === repair.message) === index
+  ))
+
+  return { files: repairedFiles, repairs: uniqueRepairs }
+}
+
 function directoryPaths(files) {
   const paths = new Set()
   files.forEach((file) => {
@@ -198,7 +238,8 @@ async function commandOutput(result) {
 }
 
 async function startRunner(body) {
-  const files = sanitizeFiles(body.files || [])
+  const repairResult = repairCommonJsxMistakes(sanitizeFiles(body.files || []))
+  const files = repairResult.files
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
 
   const targetPort = Number(body.port) || defaultPort
@@ -232,6 +273,7 @@ async function startRunner(body) {
     previewUrl: serverCommand ? sandbox.domain(proxyPort) : '',
     previewHost: serverCommand ? previewHost(sandbox, proxyPort) : '',
     viteAllowedHost: serverCommand ? viteAllowedHost(sandbox, proxyPort) : '',
+    repairs: repairResult.repairs,
   }
 
   for (const dir of directoryPaths(files)) {
@@ -243,6 +285,9 @@ async function startRunner(body) {
     content: fileContent(file),
   })))
   logs.push(`Uploaded ${files.length} project files.`)
+  if (repairResult.repairs.length) {
+    logs.push(`Auto repair applied: ${repairResult.repairs.map((repair) => `${repair.path} (${repair.message})`).join('; ')}`)
+  }
 
   if (body.install !== false && files.some((file) => file.path === 'package.json') && !isInstallCommand(command)) {
     logs.push('$ npm install')

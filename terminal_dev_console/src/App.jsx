@@ -5328,6 +5328,7 @@ runpy.run_path(target, run_name="__main__")
     ['Command', cloudDiagnostics.command || 'not started'],
     ['Vite allowed host', cloudDiagnostics.viteAllowedHost || 'not available'],
     ['Runtime', cloudDiagnostics.runtime || 'not available'],
+    ['Auto repairs', cloudDiagnostics.repairs?.length ? `${cloudDiagnostics.repairs.length} JSX repair(s)` : 'none'],
   ]
 
   if (authLoading) {
@@ -5863,6 +5864,13 @@ runpy.run_path(target, run_name="__main__")
             </div>
             <div className="troubleshoot-log">
               <strong>Runner Logs</strong>
+              {cloudDiagnostics.repairs?.length ? (
+                <div className="troubleshoot-repairs">
+                  {cloudDiagnostics.repairs.map((repair) => (
+                    <span key={`${repair.path}-${repair.message}`}>{repair.path}: {repair.message}</span>
+                  ))}
+                </div>
+              ) : null}
               <pre>{cloudRunner.logs || runtimeIssue?.message || 'No Cloud Runner logs yet. Start Cloud Run to collect diagnostics.'}</pre>
             </div>
           </div>

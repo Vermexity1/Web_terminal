@@ -2199,13 +2199,33 @@ button:disabled {
 .troubleshoot-log {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 6px;
 }
 
 .troubleshoot-log strong {
   color: #edf2ff;
   font-size: 0.76rem;
+}
+
+.troubleshoot-repairs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.troubleshoot-repairs span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #bfdbfe;
+  background: rgba(37, 99, 235, 0.12);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .troubleshoot-log pre {
