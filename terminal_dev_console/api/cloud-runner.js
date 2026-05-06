@@ -282,6 +282,10 @@ function findFileIndex(files, targetPath) {
   return files.findIndex((file) => String(file.path || '').toLowerCase() === normalizedTarget)
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function braceBalance(source) {
   let balance = 0
   let quote = ''
@@ -380,6 +384,112 @@ function unclosedJsxTags(source) {
   }
 
   return stack.map((item) => item.name)
+}
+
+function unmatchedClosingJsxTags(source) {
+  const stack = []
+  const unmatched = []
+  const tagPattern = /<\/?([A-Za-z][\w.:-]*)([^<>]*)>/g
+  let match = tagPattern.exec(source)
+
+  while (match) {
+    const fullMatch = match[0]
+    const tagName = match[1]
+    const lowerTagName = tagName.toLowerCase()
+    const isClosing = fullMatch.startsWith('</')
+    const isSelfClosing = /\/\s*>$/.test(fullMatch) || jsxVoidTags.has(lowerTagName)
+    const lineIndex = source.slice(0, match.index).split(/\r?\n/).length - 1
+
+    if (isClosing) {
+      const openIndex = stack.map((item) => item.name).lastIndexOf(tagName)
+      if (openIndex === -1) {
+        unmatched.push({ tagName, lineIndex })
+      } else {
+        stack.splice(openIndex, stack.length - openIndex)
+      }
+    } else if (!isSelfClosing) {
+      stack.push({ name: tagName })
+    }
+
+    match = tagPattern.exec(source)
+  }
+
+  return unmatched
+}
+
+function removeLineOnlyUnmatchedClosingTags(lines, newline, limit = 3) {
+  const nextLines = [...lines]
+  const removed = []
+  const unmatched = unmatchedClosingJsxTags(nextLines.join(newline)).reverse()
+
+  for (const closing of unmatched) {
+    if (removed.length >= limit) break
+
+    const line = nextLines[closing.lineIndex] || ''
+    if (line.trim() !== `</${closing.tagName}>`) continue
+
+    nextLines.splice(closing.lineIndex, 1)
+    removed.push({
+      tagName: closing.tagName,
+      line: closing.lineIndex + 1,
+    })
+  }
+
+  return { lines: nextLines, removed: removed.reverse() }
+}
+
+function repairSelfClosedTagWithClosingPartner(file, lines, newline, errorIndex, errorLocation) {
+  const closingTag = errorLocation.message.match(/Unexpected closing "([^"]+)" tag/i)?.[1]
+  if (!closingTag) return { file, repairs: [] }
+
+  const closingLine = lines[errorIndex] || ''
+  if (closingLine.trim() !== `</${closingTag}>`) return { file, repairs: [] }
+
+  const searchStart = Math.max(0, errorIndex - 80)
+  const openingPattern = new RegExp(`<${escapeRegExp(closingTag)}\\b`)
+  let openingTagIndex = -1
+  for (let index = errorIndex - 1; index >= searchStart; index -= 1) {
+    if (openingPattern.test(lines[index] || '') && !(lines[index] || '').includes(`</${closingTag}`)) {
+      openingTagIndex = index
+      break
+    }
+  }
+
+  if (openingTagIndex === -1) return { file, repairs: [] }
+
+  let selfClosingIndex = -1
+  for (let index = errorIndex - 1; index >= openingTagIndex; index -= 1) {
+    if (/\/\s*>\s*$/.test(lines[index] || '')) {
+      selfClosingIndex = index
+      break
+    }
+  }
+
+  if (selfClosingIndex === -1) return { file, repairs: [] }
+
+  let nextLines = [...lines]
+  nextLines[selfClosingIndex] = nextLines[selfClosingIndex].replace(/\/\s*>\s*$/, '>')
+  const cleanup = removeLineOnlyUnmatchedClosingTags(nextLines, newline)
+  nextLines = cleanup.lines
+
+  const repairs = [{
+    path: file.path,
+    line: selfClosingIndex + 1,
+    message: `Changed a self-closing <${closingTag} /> back into an opening <${closingTag}> because </${closingTag}> already exists.`,
+  }]
+
+  for (const removed of cleanup.removed) {
+    repairs.push({
+      path: file.path,
+      line: removed.line,
+      message: `Removed an unmatched </${removed.tagName}> closing tag left by the earlier JSX repair.`,
+    })
+  }
+
+  return {
+    file: { ...file, data: nextLines.join(newline), encoding: 'utf8' },
+    repairs,
+  }
 }
 
 function repairIncompleteJsxAtEof(file, source, lines, errorIndex, output) {
@@ -612,6 +722,14 @@ export function repairJsxFromErrorLocation(files, output) {
     return {
       files: files.map((item, index) => (index === fileIndex ? eofRepair.file : item)),
       repairs: eofRepair.repairs,
+    }
+  }
+
+  const selfClosedRepair = repairSelfClosedTagWithClosingPartner(file, lines, newline, errorIndex, errorLocation)
+  if (selfClosedRepair.repairs.length) {
+    return {
+      files: files.map((item, index) => (index === fileIndex ? selfClosedRepair.file : item)),
+      repairs: selfClosedRepair.repairs,
     }
   }
 
