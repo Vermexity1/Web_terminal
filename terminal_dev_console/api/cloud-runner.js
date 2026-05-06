@@ -87,6 +87,24 @@ function isServerCommand(command = '', requestedCommand = '') {
     .test(command)
 }
 
+function previewHost(sandbox, port) {
+  try {
+    return new URL(sandbox.domain(port)).hostname
+  } catch {
+    return ''
+  }
+}
+
+function runnerEnv(sandbox, port) {
+  const host = previewHost(sandbox, port)
+  return {
+    NODE_ENV: 'development',
+    HOST: '0.0.0.0',
+    PORT: String(port),
+    ...(host ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: host } : {}),
+  }
+}
+
 async function commandOutput(result) {
   const [stdout, stderr] = await Promise.all([
     result.stdout().catch(() => ''),
@@ -153,11 +171,7 @@ async function startRunner(body) {
       cmd: 'bash',
       args: ['-lc', command],
       cwd: appRoot,
-      env: {
-        NODE_ENV: 'development',
-        HOST: '0.0.0.0',
-        PORT: String(port),
-      },
+      env: runnerEnv(sandbox, port),
     })
     logs.push(await commandOutput(result))
     logs.push(`Command exited with code ${result.exitCode}.`)
@@ -185,11 +199,7 @@ async function startRunner(body) {
     args: ['-lc', command],
     cwd: appRoot,
     detached: true,
-    env: {
-      NODE_ENV: 'development',
-      HOST: '0.0.0.0',
-      PORT: String(port),
-    },
+    env: runnerEnv(sandbox, port),
   })
 
   return {
