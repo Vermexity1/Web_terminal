@@ -3392,6 +3392,50 @@ button:disabled {
   background: white;
 }
 
+.preview-tab-launcher {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 28px;
+  text-align: center;
+  background:
+    linear-gradient(135deg, rgba(29, 78, 216, 0.14), transparent 38%),
+    #020617;
+  color: #dbeafe;
+}
+
+.preview-tab-launcher strong {
+  color: #fff;
+  font-size: 1.05rem;
+}
+
+.preview-tab-launcher span {
+  max-width: 520px;
+  color: #9fb1c8;
+  line-height: 1.5;
+}
+
+.preview-tab-launcher button {
+  height: 34px;
+  border: 1px solid rgba(96, 165, 250, 0.55);
+  border-radius: 6px;
+  color: #fff;
+  background: linear-gradient(180deg, #2563eb, #1d4ed8);
+  cursor: pointer;
+}
+
+.preview-tab-launcher code {
+  max-width: min(620px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #60a5fa;
+  font-size: 0.7rem;
+}
+
 .preview-live-bar {
   min-height: 32px;
   display: flex;
@@ -3410,12 +3454,6 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.preview-live-bar small {
-  flex: 0 0 auto;
-  color: #60a5fa;
-  font-size: 0.68rem;
 }
 
 .preview-live-bar button {
