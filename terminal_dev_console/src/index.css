@@ -1143,6 +1143,55 @@ button:disabled {
   font-size: 0.78rem;
 }
 
+.runtime-alert {
+  display: grid;
+  gap: 7px;
+  margin: 8px;
+  padding: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 7px;
+  color: #dce8f8;
+  background: linear-gradient(180deg, rgba(15, 36, 66, 0.88), rgba(6, 12, 24, 0.92));
+  box-shadow: inset 2px 0 0 #60a5fa;
+}
+
+.runtime-alert strong {
+  font-size: 0.78rem;
+}
+
+.runtime-alert p,
+.runtime-alert li {
+  margin: 0;
+  color: #9fb1c8;
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.runtime-alert ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.runtime-alert button {
+  justify-self: start;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(96, 165, 250, 0.42);
+  border-radius: 5px;
+  color: #dbeafe;
+  background: rgba(37, 99, 235, 0.22);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.runtime-alert button:hover {
+  border-color: rgba(147, 197, 253, 0.72);
+  background: rgba(37, 99, 235, 0.34);
+}
+
 .project-summary {
   margin: 8px;
   padding: 10px;
@@ -2457,22 +2506,29 @@ button:disabled {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 8px;
   padding: 2px 2px 4px;
 }
 
 .ai-message {
   position: relative;
-  max-width: 94%;
+  width: fit-content;
+  min-width: min(160px, 100%);
+  max-width: min(720px, 94%);
   padding: 8px;
   border: 1px solid rgba(87, 107, 132, 0.22);
   border-radius: 8px;
   background: rgba(10, 15, 24, 0.78);
   overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .ai-message.is-user {
   align-self: flex-end;
+  min-width: min(140px, 100%);
+  max-width: min(680px, 88%);
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(20, 55, 104, 0.72);
 }
@@ -2530,12 +2586,16 @@ button:disabled {
   color: #dce8f8;
   font-size: 0.74rem;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .ai-message small {
   margin-top: 6px;
   color: #8fa0b3;
   font-size: 0.66rem;
+  overflow-wrap: anywhere;
 }
 
 .ai-working-visual {

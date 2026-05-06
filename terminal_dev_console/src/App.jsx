@@ -7,6 +7,7 @@ let pyodideLoadPromise
 
 const ignoredExplorerNames = new Set(['node_modules', '.git', 'dist'])
 const defaultRunPort = 5173
+const webContainerBootTimeoutMs = 45000
 const pyodideVersion = '0.26.4'
 const pyodideIndexUrl = `https://cdn.jsdelivr.net/pyodide/v${pyodideVersion}/full/`
 const pythonWorkspaceRoot = '/workspace'
@@ -1281,14 +1282,58 @@ const getWebContainer = async () => {
   if (!webcontainerBootPromise) {
     webcontainerBootPromise = import('@webcontainer/api').then(({ WebContainer }) =>
       WebContainer.boot({
-        coep: 'require-corp',
+        coep: 'credentialless',
         forwardPreviewErrors: 'exceptions-only',
         workdirName: 'workspace',
       }),
-    )
+    ).catch((error) => {
+      webcontainerBootPromise = null
+      throw error
+    })
   }
 
   return webcontainerBootPromise
+}
+
+function getBrowserRuntimeSupport() {
+  const issues = []
+
+  if (!window.isSecureContext) {
+    issues.push('The page is not running in a secure browser context. Use HTTPS or localhost.')
+  }
+
+  if (!window.crossOriginIsolated) {
+    issues.push('Cross-origin isolation is not active. WebContainer needs COOP and COEP headers.')
+  }
+
+  if (typeof window.SharedArrayBuffer === 'undefined') {
+    issues.push('SharedArrayBuffer is unavailable. Some school Chromebook policies disable it.')
+  }
+
+  if (!navigator.serviceWorker) {
+    issues.push('Service workers are unavailable or blocked by this browser profile.')
+  }
+
+  if (!window.indexedDB) {
+    issues.push('IndexedDB is unavailable, so the browser runtime cannot persist its workspace.')
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    message: issues.length
+      ? 'This browser is blocking one or more features required by the in-browser runtime.'
+      : 'Browser runtime checks passed.',
+  }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId))
 }
 
 const joinPath = (base, name) => (base ? `${base}/${name}` : name)
@@ -2096,6 +2141,7 @@ export default function App() {
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [operationStatus, setOperationStatus] = useState('')
+  const [runtimeIssue, setRuntimeIssue] = useState(null)
   const [projectName, setProjectName] = useState('No folder opened')
   const [activeActivity, setActiveActivity] = useState('explorer')
   const [selectedCommandGroup, setSelectedCommandGroup] = useState('all')
@@ -2672,7 +2718,34 @@ export default function App() {
 
     async function boot() {
       try {
-        const container = await getWebContainer()
+        setRuntimeIssue(null)
+        setWebcontainer(null)
+        setBootStatus('Checking browser support...')
+        setOperationStatus('Checking whether this browser can run the in-browser runtime...')
+
+        const support = getBrowserRuntimeSupport()
+        if (!support.ok) {
+          const message = `${support.message} ${support.issues.join(' ')}`
+          setRuntimeIssue({
+            title: 'Runtime blocked by this browser',
+            message,
+            issues: support.issues,
+          })
+          setBootStatus('Browser runtime blocked')
+          setOperationStatus(message)
+          addProblem('Browser Runtime', message)
+          bootStartedRef.current = false
+          return
+        }
+
+        setBootStatus('Loading WebContainer runtime...')
+        const container = await withTimeout(
+          getWebContainer(),
+          webContainerBootTimeoutMs,
+          'WebContainer startup timed out. On school Chromebooks this usually means the browser, extension policy, or network filter blocked the isolated runtime.',
+        )
+
+        setBootStatus('Connecting runtime services...')
 
         unsubscribeServer = container.on('server-ready', (port, url) => {
           setPreviewUrl(url)
@@ -2718,12 +2791,28 @@ export default function App() {
         }
 
         setBootStatus('Ready')
+        setRuntimeIssue(null)
         setOperationStatus('Open a folder or files to start running Node, Python, and browser code.')
       } catch (error) {
+        const message = error?.message || 'WebContainer failed to start.'
         setIsInstalling(false)
         setBootStatus('WebContainer failed to start')
-        setOperationStatus(error.message)
-        writeTerminal(`\r\nWebContainer failed: ${error.message}\r\n`)
+        setRuntimeIssue({
+          title: 'WebContainer could not start',
+          message,
+          issues: [
+            'Reload the page once after this deploy so the new browser isolation headers are active.',
+            'Use Chrome on HTTPS. School-managed guest or locked profiles can block SharedArrayBuffer, service workers, or IndexedDB.',
+            'If it still hangs on a school Chromebook, the admin policy may be blocking the browser runtime itself.',
+          ],
+        })
+        setOperationStatus(message)
+        addProblem('WebContainer', message)
+        writeTerminal(`\r\nWebContainer failed: ${message}\r\n`)
+        if (!/timed out/i.test(message)) {
+          webcontainerBootPromise = null
+          bootStartedRef.current = false
+        }
       }
     }
 
@@ -3215,6 +3304,7 @@ runpy.run_path(target, run_name="__main__")
       return
     }
 
+    setAiPrompt('')
     setIsAiRunning(true)
     setAiRunPhase('thinking')
     setAiStatus(`${provider.label} is planning the change...`)
@@ -3411,7 +3501,6 @@ runpy.run_path(target, run_name="__main__")
           status: 'applied',
         },
       ])
-      setAiPrompt('')
       setAiStatus(`Applied ${appliedCount} file edit(s), +${changeSet.added} / -${changeSet.removed} lines.`)
       setOperationStatus(`AI applied ${appliedCount} file edit(s).`)
     } catch (error) {
@@ -4232,6 +4321,12 @@ runpy.run_path(target, run_name="__main__")
           value={aiPrompt}
           placeholder="Ask the AI agent to build or change something..."
           onChange={(event) => setAiPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              event.currentTarget.form?.requestSubmit()
+            }
+          }}
         />
         <div className="ai-actions">
           <button type="submit" disabled={isAiRunning}>
@@ -4672,6 +4767,22 @@ runpy.run_path(target, run_name="__main__")
           <span className={bootStatus === 'Ready' ? 'status-ok' : 'status-busy'} />
           {bootStatus}
         </div>
+        {runtimeIssue ? (
+          <div className="runtime-alert" role="alert">
+            <strong>{runtimeIssue.title}</strong>
+            <p>{runtimeIssue.message}</p>
+            {runtimeIssue.issues?.length ? (
+              <ul>
+                {runtimeIssue.issues.map((issue) => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            ) : null}
+            <button type="button" onClick={() => window.location.reload()}>
+              Reload and retry
+            </button>
+          </div>
+        ) : null}
         {aiCoderPanel}
         <div className="file-dock-header">
           <div>
