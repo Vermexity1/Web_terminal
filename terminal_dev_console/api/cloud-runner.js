@@ -136,6 +136,10 @@ function rememberRepair(repairs, repair) {
   repairs.push(repair)
 }
 
+function stripAnsi(value = '') {
+  return String(value).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+}
+
 function repairBareJsxStyleBlocks(source, filePath, repairs) {
   const newline = source.includes('\r\n') ? '\r\n' : '\n'
   const lines = source.split(/\r?\n/)
@@ -249,19 +253,23 @@ export function repairCommonJsxMistakes(files) {
 }
 
 export function parseBabelUnexpectedToken(output = '') {
+  const cleanOutput = stripAnsi(output)
   const patterns = [
     /\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx))["']?\s*:?\s*Unexpected token\s*\((\d+):(\d+)\)/i,
     /\[plugin:vite:react-babel\]\s+\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):\s*Unexpected token\s*\((\d+):(\d+)\)/i,
+    /\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):(\d+):(\d+):\s*ERROR:\s*([^\r\n]+)/i,
+    /file:\s*\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):(\d+):(\d+)/i,
     /\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):(\d+):(\d+)/i,
   ]
 
   for (const pattern of patterns) {
-    const match = output.match(pattern)
+    const match = cleanOutput.match(pattern)
     if (match) {
       return {
         path: match[1].replaceAll('\\', '/').replace(/^\/+/, ''),
         line: Number(match[2]) || 0,
         column: Number(match[3]) || 0,
+        message: match[4] || '',
       }
     }
   }
@@ -272,6 +280,118 @@ export function parseBabelUnexpectedToken(output = '') {
 function findFileIndex(files, targetPath) {
   const normalizedTarget = String(targetPath || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase()
   return files.findIndex((file) => String(file.path || '').toLowerCase() === normalizedTarget)
+}
+
+function braceBalance(source) {
+  let balance = 0
+  let quote = ''
+  let escaped = false
+
+  for (const char of source) {
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === quote) {
+        quote = ''
+      }
+      continue
+    }
+
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+    } else if (char === '{') {
+      balance += 1
+    } else if (char === '}') {
+      balance -= 1
+    }
+  }
+
+  return balance
+}
+
+function parenBalance(source) {
+  let balance = 0
+  let quote = ''
+  let escaped = false
+
+  for (const char of source) {
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === quote) {
+        quote = ''
+      }
+      continue
+    }
+
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+    } else if (char === '(') {
+      balance += 1
+    } else if (char === ')') {
+      balance -= 1
+    }
+  }
+
+  return balance
+}
+
+function repairIncompleteJsxAtEof(file, source, lines, errorIndex, output) {
+  const cleanOutput = stripAnsi(output)
+  if (!/Expected\s+">"\s+but\s+found\s+end of file/i.test(cleanOutput)) {
+    return { file, repairs: [] }
+  }
+
+  let lastContentIndex = lines.length - 1
+  while (lastContentIndex >= 0 && !lines[lastContentIndex].trim()) lastContentIndex -= 1
+  if (lastContentIndex < 0 || !/^\}\}\s*$/.test(lines[lastContentIndex].trim())) {
+    return { file, repairs: [] }
+  }
+
+  const searchStart = Math.max(0, lastContentIndex - 80)
+  let openingTagIndex = -1
+  for (let index = lastContentIndex; index >= searchStart; index -= 1) {
+    if (/<[A-Za-z][\w.:-]*\b/.test(lines[index]) && !lines[index].includes('>')) {
+      openingTagIndex = index
+      break
+    }
+  }
+
+  if (openingTagIndex === -1) return { file, repairs: [] }
+
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const nextLines = [...lines]
+  nextLines[lastContentIndex] = `${nextLines[lastContentIndex]} />`
+
+  const currentSource = nextLines.join(newline)
+  const openParens = Math.max(0, parenBalance(currentSource))
+  const openBraces = Math.max(0, braceBalance(currentSource))
+
+  for (let index = 0; index < Math.min(openParens, 4); index += 1) {
+    nextLines.push(index === 0 ? '  )' : ')')
+  }
+
+  for (let index = 0; index < Math.min(openBraces, 4); index += 1) {
+    nextLines.push('}')
+  }
+
+  if (!/\bexport\s+default\b/.test(source) && /\bfunction\s+App\s*\(/.test(source)) {
+    nextLines.push('')
+    nextLines.push('export default App')
+  }
+
+  return {
+    file: { ...file, data: nextLines.join(newline), encoding: 'utf8' },
+    repairs: [{
+      path: file.path,
+      line: lastContentIndex + 1,
+      message: 'Closed an incomplete JSX tag and component at end of file.',
+    }],
+  }
 }
 
 export function repairJsxFromErrorLocation(files, output) {
@@ -287,6 +407,14 @@ export function repairJsxFromErrorLocation(files, output) {
   const newline = source.includes('\r\n') ? '\r\n' : '\n'
   const lines = source.split(/\r?\n/)
   const errorIndex = Math.max(0, Math.min(lines.length - 1, errorLocation.line - 1))
+  const eofRepair = repairIncompleteJsxAtEof(file, source, lines, errorIndex, output)
+  if (eofRepair.repairs.length) {
+    return {
+      files: files.map((item, index) => (index === fileIndex ? eofRepair.file : item)),
+      repairs: eofRepair.repairs,
+    }
+  }
+
   const searchStart = Math.max(0, errorIndex - 80)
   let openingIndex = -1
 
