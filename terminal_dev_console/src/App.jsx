@@ -2377,7 +2377,7 @@ export default function App() {
     }
 
     bufferedTerminalOutputRef.current += data
-  }, [clearStaticPreview])
+  }, [])
 
   const clearStaticPreview = useCallback(() => {
     staticPreviewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
