@@ -965,6 +965,7 @@ async function startRunner(body, user) {
   const repairs = [...restoreResult.repairs, ...repairResult.repairs]
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
   let repairsPersisted = false
+  const projectPackageJson = packageJsonFromFiles(files)
 
   const targetPort = Number(body.port) || defaultPort
   const requestedProxyPort = Number(body.proxyPort) || defaultProxyPort
@@ -986,7 +987,10 @@ async function startRunner(body, user) {
     },
   })
 
-  const logs = [`Cloud sandbox ${sandbox.sandboxId} created.`]
+  const logs = [
+    `Cloud sandbox ${sandbox.sandboxId} created.`,
+    `Runner file source: ${chosenSource.source}; files: ${files.length}; package: ${projectPackageJson?.name || 'none'}.`,
+  ]
   const diagnostics = {
     mode: serverCommand ? 'preview-proxy' : 'command',
     sandboxId: sandbox.sandboxId,
@@ -994,6 +998,9 @@ async function startRunner(body, user) {
     command,
     requestedCommand,
     fileSource: chosenSource.source,
+    fileCount: files.length,
+    packageName: projectPackageJson?.name || '',
+    sampleFiles: files.slice(0, 12).map((file) => file.path),
     targetPort,
     proxyPort,
     previewUrl: serverCommand ? sandbox.domain(proxyPort) : '',

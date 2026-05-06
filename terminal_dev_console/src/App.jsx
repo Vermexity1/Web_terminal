@@ -2444,6 +2444,7 @@ export default function App() {
   const saveSnapshotTimerRef = useRef(null)
   const cloudSettingsTimerRef = useRef(null)
   const activeCloudProjectRef = useRef(null)
+  const workspaceProjectIdRef = useRef('')
   const loadedCloudProjectIdRef = useRef('')
   const previewUrlsByPortRef = useRef(new Map())
   const activePreviewPortRef = useRef(0)
@@ -2597,8 +2598,19 @@ export default function App() {
     }
     devProcessRef.current?.kill()
     devProcessRef.current = null
+    try {
+      webcontainer?.teardown()
+    } catch {
+      // Signing out should still clear the local UI if teardown is already complete.
+    }
+    webcontainerBootPromise = null
+    bootStartedRef.current = false
     setDevStatus('Stopped')
+    setWebcontainer(null)
     setCurrentUser(null)
+    activeCloudProjectRef.current = null
+    workspaceProjectIdRef.current = ''
+    loadedCloudProjectIdRef.current = ''
     setActiveCloudProject(null)
     setCloudProjects([])
     setProjectName('No folder opened')
@@ -2612,7 +2624,7 @@ export default function App() {
     setAuthError('')
     setAuthMode('signin')
     setAuthForm({ name: '', email: '', password: '' })
-  }, [cloudRunner.sandboxId])
+  }, [cloudRunner.sandboxId, webcontainer])
 
   const refreshExplorer = useCallback(async (container = webcontainer) => {
     if (!container) return
@@ -2675,7 +2687,7 @@ export default function App() {
           files,
           savedAt: Date.now(),
         })
-        if (activeProject?.id) {
+        if (activeProject?.id && workspaceProjectIdRef.current === activeProject.id) {
           const data = await apiRequest('/api/projects', {
             method: 'POST',
             body: {
@@ -2686,6 +2698,7 @@ export default function App() {
             },
           })
           const savedProject = projectFromApi(data.project)
+          activeCloudProjectRef.current = savedProject
           setActiveCloudProject(savedProject)
           setCloudProjects((projects) => {
             const summary = {
@@ -2772,6 +2785,8 @@ export default function App() {
   )
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath), [activePath, tabs])
+  const currentUserId = currentUser?.id || ''
+  const hasActiveCloudProject = Boolean(activeCloudProject?.id)
 
   const getNpmServerArgs = useCallback((script) => {
     const scriptHint = projectScripts.find((item) => item.command === `npm run ${script}`)?.hint || ''
@@ -3008,6 +3023,9 @@ export default function App() {
     }
 
     loadedCloudProjectIdRef.current = ''
+    workspaceProjectIdRef.current = ''
+    activeCloudProjectRef.current = null
+    bootStartedRef.current = false
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
   }, [activeCloudProject, cloudRunner.sandboxId, loadCloudProjects, saveAllDirtyTabs, stopDevServer, webcontainer])
@@ -3253,7 +3271,7 @@ export default function App() {
       bootCleanupRef.current.unsubscribePreviewMessage?.()
     }
 
-    if (authLoading || !currentUser || !activeCloudProject) return cleanupBoot
+    if (authLoading || !currentUserId || !hasActiveCloudProject) return cleanupBoot
     if (bootStartedRef.current) return cleanupBoot
     bootStartedRef.current = true
 
@@ -3378,7 +3396,7 @@ export default function App() {
     boot()
 
     return cleanupBoot
-  }, [activeCloudProject, authLoading, currentUser])
+  }, [authLoading, currentUserId, hasActiveCloudProject])
 
   const handleTerminalReady = useCallback(
     (api) => {
@@ -3729,14 +3747,16 @@ runpy.run_path(target, run_name="__main__")
   }, [addProblem, cloudRunner.commandId, cloudRunner.sandboxId])
 
   const startCloudRunner = useCallback(async (command = '', options = {}) => {
-    if (!activeCloudProject?.id) {
+    const activeProject = activeCloudProjectRef.current || activeCloudProject
+    if (!activeProject?.id) {
       setOperationStatus('Create or open a project before starting Cloud Runner.')
       return
     }
 
-    let files = activeCloudProject.files || []
+    let files = activeProject.files || []
+    let fileSource = files.length ? 'saved project' : 'empty project'
     const previousSandboxId = cloudRunner.sandboxId
-    const useStoredFiles = options.useStoredFiles ?? true
+    const persistFilesBeforeRun = options.persistFilesBeforeRun ?? true
     let previewWindow = null
     let previewTabOpened = false
 
@@ -3802,20 +3822,26 @@ runpy.run_path(target, run_name="__main__")
 
       if (webcontainer) {
         await saveAllDirtyTabs({ silent: true })
-        files = await readWorkspaceFiles(webcontainer)
+        if (workspaceProjectIdRef.current === activeProject.id || options.useWorkspaceFiles === true) {
+          files = await readWorkspaceFiles(webcontainer)
+          fileSource = 'active workspace'
+        }
       }
 
       if (!files.length) {
         throw new Error('Cloud Runner needs project files. Upload a folder or load the demo first.')
       }
 
-      if (useStoredFiles) {
+      const previewFileList = files.slice(0, 8).map((file) => file.path).join(', ')
+      writeTerminal(`\x1b[36mCloud Runner source:\x1b[0m ${fileSource} (${files.length} files${previewFileList ? `: ${previewFileList}` : ''})\r\n`)
+
+      if (persistFilesBeforeRun) {
         const data = await apiRequest('/api/projects', {
           method: 'POST',
           body: {
             action: 'save',
-            id: activeCloudProject.id,
-            name: projectNameRef.current || activeCloudProject.name,
+            id: activeProject.id,
+            name: projectNameRef.current || activeProject.name,
             files: filesForApi(files),
           },
         })
@@ -3837,10 +3863,10 @@ runpy.run_path(target, run_name="__main__")
 
       const body = {
         action: 'start',
-        projectId: activeCloudProject.id,
+        projectId: activeProject.id,
         command,
         files: filesForApi(files),
-        useStoredFiles,
+        useStoredFiles: false,
         port: defaultRunPort,
         install: true,
       }
@@ -4883,6 +4909,7 @@ runpy.run_path(target, run_name="__main__")
       terminalApiRef.current = null
       bufferedTerminalOutputRef.current = ''
       setTerminalSessionKey((key) => key + 1)
+      let cloudSaveWarning = ''
 
       try {
         await clearWorkspace(webcontainer)
@@ -4901,12 +4928,47 @@ runpy.run_path(target, run_name="__main__")
         const firstFile = pickDefaultFile(files)
         if (firstFile) await openFile(firstFile, webcontainer)
 
+        workspaceProjectIdRef.current = activeCloudProjectRef.current?.id || ''
+
+        if (!options.skipCloudSave && activeCloudProjectRef.current?.id) {
+          try {
+            const activeProject = activeCloudProjectRef.current
+            const data = await apiRequest('/api/projects', {
+              method: 'POST',
+              body: {
+                action: 'save',
+                id: activeProject.id,
+                name,
+                files: filesForApi(files),
+              },
+            })
+            const project = projectFromApi(data.project)
+            activeCloudProjectRef.current = project
+            setActiveCloudProject(project)
+            setCloudProjects((projects) => {
+              const summary = {
+                id: project.id,
+                name: project.name,
+                fileCount: project.files?.length || 0,
+                createdAt: project.createdAt,
+                updatedAt: project.updatedAt,
+                lastOpenedAt: project.lastOpenedAt,
+              }
+              return [summary, ...projects.filter((item) => item.id !== project.id)]
+            })
+            workspaceProjectIdRef.current = project.id
+          } catch (error) {
+            cloudSaveWarning = ` Cloud save failed: ${error.message}`
+            addProblem('Cloud Save', error.message)
+          }
+        }
+
         if (!options.skipSnapshot) {
           await saveCurrentSnapshot(webcontainer, name)
         }
 
         setLayoutMode('all')
-        setOperationStatus(`Imported ${name}. Run npm scripts for web apps, or open a .py file and click Run File.`)
+        setOperationStatus(`Imported ${name}. Run npm scripts for web apps, or open a .py file and click Run File.${cloudSaveWarning}`)
         writeTerminal(`\r\n\x1b[1;32mImported ${files.length} files into WebContainer.\x1b[0m\r\n`)
       } catch (error) {
         setOperationStatus(`Import failed: ${error.message}`)
@@ -4915,7 +4977,7 @@ runpy.run_path(target, run_name="__main__")
         setIsImporting(false)
       }
     },
-    [clearStaticPreview, detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, saveImportedFilesToCloudProject, stopDevServer, webcontainer, writeTerminal],
+    [addProblem, clearStaticPreview, detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, saveImportedFilesToCloudProject, stopDevServer, webcontainer, writeTerminal],
   )
 
   const restoreSavedProject = useCallback(async () => {
@@ -4945,6 +5007,8 @@ runpy.run_path(target, run_name="__main__")
         body: { action: 'create', name, files: [] },
       })
       const project = projectFromApi(data.project)
+      activeCloudProjectRef.current = project
+      workspaceProjectIdRef.current = ''
       setLayoutMode('all')
       setIsSettingsOpen(false)
       loadedCloudProjectIdRef.current = ''
@@ -4975,6 +5039,8 @@ runpy.run_path(target, run_name="__main__")
       const data = await apiRequest(`/api/projects?id=${encodeURIComponent(projectId)}`)
       const project = projectFromApi(data.project)
       loadedCloudProjectIdRef.current = ''
+      activeCloudProjectRef.current = project
+      workspaceProjectIdRef.current = ''
       setActiveCloudProject(project)
       setTree(treeFromFiles(project.files || []))
       setProjectName(project.name)
@@ -4990,6 +5056,7 @@ runpy.run_path(target, run_name="__main__")
     loadedCloudProjectIdRef.current = activeCloudProject.id
     importProjectFiles(activeCloudProject.files || [], activeCloudProject.name || 'Cloud Project', {
       skipSnapshot: true,
+      skipCloudSave: true,
       allowEmpty: true,
     }).then(() => {
       setOperationStatus(`Opened ${activeCloudProject.name || 'cloud project'}.`)
