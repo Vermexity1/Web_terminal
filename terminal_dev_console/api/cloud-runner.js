@@ -340,15 +340,57 @@ function parenBalance(source) {
   return balance
 }
 
+const jsxVoidTags = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+])
+
+function unclosedJsxTags(source) {
+  const stack = []
+  const tagPattern = /<\/?([A-Za-z][\w.:-]*)([^<>]*)>/g
+  let match = tagPattern.exec(source)
+
+  while (match) {
+    const fullMatch = match[0]
+    const tagName = match[1]
+    const lowerTagName = tagName.toLowerCase()
+    const isClosing = fullMatch.startsWith('</')
+    const isSelfClosing = /\/\s*>$/.test(fullMatch) || jsxVoidTags.has(lowerTagName)
+
+    if (isClosing) {
+      const openIndex = stack.map((item) => item.name).lastIndexOf(tagName)
+      if (openIndex !== -1) stack.splice(openIndex, stack.length - openIndex)
+    } else if (!isSelfClosing) {
+      stack.push({ name: tagName })
+    }
+
+    match = tagPattern.exec(source)
+  }
+
+  return stack.map((item) => item.name)
+}
+
 function repairIncompleteJsxAtEof(file, source, lines, errorIndex, output) {
   const cleanOutput = stripAnsi(output)
-  if (!/Expected\s+">"\s+but\s+found\s+end of file/i.test(cleanOutput)) {
+  if (!/(Expected\s+">"\s+but\s+found\s+end of file|Unexpected\s+end of file before a closing\s+"[^"]+"\s+tag)/i.test(cleanOutput)) {
     return { file, repairs: [] }
   }
 
   let lastContentIndex = lines.length - 1
   while (lastContentIndex >= 0 && !lines[lastContentIndex].trim()) lastContentIndex -= 1
-  if (lastContentIndex < 0 || !/^\}\}\s*$/.test(lines[lastContentIndex].trim())) {
+  if (lastContentIndex < 0) {
     return { file, repairs: [] }
   }
 
@@ -365,7 +407,15 @@ function repairIncompleteJsxAtEof(file, source, lines, errorIndex, output) {
 
   const newline = source.includes('\r\n') ? '\r\n' : '\n'
   const nextLines = [...lines]
-  nextLines[lastContentIndex] = `${nextLines[lastContentIndex]} />`
+
+  if (/^\}\}\s*$/.test(nextLines[lastContentIndex].trim())) {
+    nextLines[lastContentIndex] = `${nextLines[lastContentIndex]} />`
+  }
+
+  const unclosedTags = unclosedJsxTags(nextLines.join(newline))
+  for (const tagName of unclosedTags.reverse()) {
+    nextLines.push(`    </${tagName}>`)
+  }
 
   const currentSource = nextLines.join(newline)
   const openParens = Math.max(0, parenBalance(currentSource))
@@ -392,6 +442,89 @@ function repairIncompleteJsxAtEof(file, source, lines, errorIndex, output) {
       message: 'Closed an incomplete JSX tag and component at end of file.',
     }],
   }
+}
+
+function recoveryBackupPath(filePath) {
+  if (/\.(jsx|tsx)$/i.test(filePath)) {
+    return filePath.replace(/\.(jsx|tsx)$/i, '.broken.$1')
+  }
+
+  return `${filePath}.broken`
+}
+
+function recoveryReactSource(originalPath, backupPath) {
+  return `import React from 'react'
+
+export default function App() {
+  return (
+    <main
+      style={{
+        minHeight: '100vh',
+        display: 'grid',
+        placeItems: 'center',
+        background: '#030712',
+        color: '#dbeafe',
+        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+        padding: 32,
+      }}
+    >
+      <section
+        style={{
+          width: 'min(720px, 100%)',
+          border: '1px solid #1d4ed8',
+          borderRadius: 12,
+          background: '#07111f',
+          boxShadow: '0 24px 80px rgba(0, 0, 0, 0.35)',
+          padding: 28,
+        }}
+      >
+        <p style={{ margin: 0, color: '#60a5fa', fontWeight: 700 }}>Preview recovered</p>
+        <h1 style={{ margin: '10px 0 12px', color: '#f8fafc', fontSize: 34 }}>
+          Your project is running.
+        </h1>
+        <p style={{ margin: 0, lineHeight: 1.7, color: '#b6c7de' }}>
+          The previous ${originalPath} file ended before its JSX was complete, so Runable backed it up to ${backupPath} and started this safe preview.
+        </p>
+      </section>
+    </main>
+  )
+}
+`
+}
+
+export function recoverBrokenReactEntry(files, output) {
+  const errorLocation = parseBabelUnexpectedToken(output)
+  const repairs = []
+  if (!errorLocation?.path || !/src\/App\.(jsx|tsx)$/i.test(errorLocation.path)) return { files, repairs }
+
+  const fileIndex = findFileIndex(files, errorLocation.path)
+  if (fileIndex === -1) return { files, repairs }
+
+  const file = files[fileIndex]
+  const backupPath = recoveryBackupPath(file.path)
+  const hasBackup = files.some((item) => String(item.path || '').toLowerCase() === backupPath.toLowerCase())
+  const recoveredFile = {
+    ...file,
+    data: recoveryReactSource(file.path, backupPath),
+    encoding: 'utf8',
+  }
+
+  const nextFiles = files.map((item, index) => (index === fileIndex ? recoveredFile : item))
+  if (!hasBackup) {
+    nextFiles.push({
+      path: backupPath,
+      data: fileContent(file).toString('utf8'),
+      encoding: 'utf8',
+    })
+  }
+
+  repairs.push({
+    path: file.path,
+    line: errorLocation.line,
+    message: `Recovered an incomplete React entry and backed up the original to ${backupPath}.`,
+  })
+
+  return { files: nextFiles, repairs }
 }
 
 export function repairJsxFromErrorLocation(files, output) {
@@ -716,37 +849,51 @@ async function startRunner(body, user) {
   }
 
   if (serverCommand && body.verify !== false) {
-    const buildCheck = await runBuildCheck(sandbox, logs, files)
+    let buildCheck = await runBuildCheck(sandbox, logs, files)
     diagnostics.compileCheck = buildCheck.skipped
       ? 'skipped'
       : (buildCheck.exitCode === 0 ? 'passed' : 'failed')
 
     if (!buildCheck.skipped && buildCheck.exitCode !== 0) {
-      const locationRepair = repairJsxFromErrorLocation(files, buildCheck.output)
-      if (locationRepair.repairs.length) {
+      for (let attempt = 1; attempt <= 4 && buildCheck.exitCode !== 0; attempt += 1) {
+        const locationRepair = repairJsxFromErrorLocation(files, buildCheck.output)
+        if (!locationRepair.repairs.length) {
+          logs.push('Compile check failed, but no safe JSX auto-repair matched the error.')
+          break
+        }
+
         files = locationRepair.files
         repairs.push(...locationRepair.repairs)
         diagnostics.repairs = repairs
-        logs.push(`Compile repair applied: ${locationRepair.repairs.map((repair) => `${repair.path}:${repair.line} (${repair.message})`).join('; ')}`)
+        logs.push(`Compile repair attempt ${attempt} applied: ${locationRepair.repairs.map((repair) => `${repair.path}:${repair.line} (${repair.message})`).join('; ')}`)
         await sandbox.writeFiles(files.map((file) => ({
           path: file.path,
           content: fileContent(file),
         })))
 
-        const retryBuildCheck = await runBuildCheck(sandbox, logs, files)
-        diagnostics.compileCheck = retryBuildCheck.exitCode === 0 ? 'repaired' : 'failed after repair'
-        if (retryBuildCheck.exitCode !== 0 && parseBabelUnexpectedToken(retryBuildCheck.output)) {
+        buildCheck = await runBuildCheck(sandbox, logs, files)
+        diagnostics.compileCheck = buildCheck.exitCode === 0 ? 'repaired' : `repair attempt ${attempt} failed`
+      }
+
+      if (buildCheck.exitCode !== 0 && parseBabelUnexpectedToken(buildCheck.output)) {
+        const recovery = recoverBrokenReactEntry(files, buildCheck.output)
+        if (recovery.repairs.length) {
+          files = recovery.files
+          repairs.push(...recovery.repairs)
+          diagnostics.repairs = repairs
+          logs.push(`Recovery fallback applied: ${recovery.repairs.map((repair) => `${repair.path}:${repair.line} (${repair.message})`).join('; ')}`)
+          await sandbox.writeFiles(files.map((file) => ({
+            path: file.path,
+            content: fileContent(file),
+          })))
+
+          buildCheck = await runBuildCheck(sandbox, logs, files)
+          diagnostics.compileCheck = buildCheck.exitCode === 0 ? 'recovered' : 'failed after recovery'
+        }
+
+        if (buildCheck.exitCode !== 0 && parseBabelUnexpectedToken(buildCheck.output)) {
           await sandbox.stop({ blocking: false }).catch(() => {})
           throw Object.assign(new Error('Vite still cannot compile this project after JSX auto-repair.'), {
-            status: 500,
-            details: logs.join('\n'),
-          })
-        }
-      } else {
-        logs.push('Compile check failed, but no safe JSX auto-repair matched the error.')
-        if (parseBabelUnexpectedToken(buildCheck.output)) {
-          await sandbox.stop({ blocking: false }).catch(() => {})
-          throw Object.assign(new Error('Vite found a JSX syntax error that could not be auto-repaired safely.'), {
             status: 500,
             details: logs.join('\n'),
           })
