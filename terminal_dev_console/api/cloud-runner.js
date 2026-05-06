@@ -848,13 +848,68 @@ function firstPythonFile(files) {
 }
 
 function defaultCommand(files, requestedCommand, port) {
-  if (requestedCommand) return String(requestedCommand)
+  if (requestedCommand) return commandForSandbox(files, String(requestedCommand), port)
   const packageJson = packageJsonFromFiles(files)
-  if (hasScript(packageJson, 'dev')) return `npm run dev -- --host 0.0.0.0 --port ${port}`
-  if (hasScript(packageJson, 'start')) return `npm run start -- --host 0.0.0.0 --port ${port}`
+  if (hasDependency(packageJson, 'next') && hasScript(packageJson, 'dev')) {
+    return `npm run dev -- --hostname 0.0.0.0 --port ${port}`
+  }
+  if (packageUsesVite(packageJson) && hasScript(packageJson, 'dev')) return `npm run dev -- --host 0.0.0.0 --port ${port}`
+  if (hasScript(packageJson, 'dev')) return 'npm run dev'
+  if (packageUsesVite(packageJson) && hasScript(packageJson, 'start')) return `npm run start -- --host 0.0.0.0 --port ${port}`
+  if (hasScript(packageJson, 'start')) return 'npm start'
   const pythonFile = firstPythonFile(files)
   if (pythonFile) return `python3 ${JSON.stringify(pythonFile)}`
   return `npx vite --host 0.0.0.0 --port ${port}`
+}
+
+function packageUsesVite(packageJson) {
+  return hasDependency(packageJson, 'vite')
+}
+
+function appendArgs(command, args) {
+  const trimmed = String(command || '').trim()
+  if (!trimmed) return args.join(' ')
+  if (/\s--\s/.test(trimmed)) return `${trimmed} ${args.join(' ')}`
+  return `${trimmed} -- ${args.join(' ')}`
+}
+
+function commandForSandbox(files, requestedCommand, port) {
+  const command = String(requestedCommand || '').trim()
+  if (!command) return command
+
+  const packageJson = packageJsonFromFiles(files)
+  const hasHost = /\b--host(?:name)?\b|\b-H\b/i.test(command)
+  const hasPort = /\b--port\b|\s-p\s+\d+/i.test(command)
+
+  if (packageUsesVite(packageJson) && /^\s*(npm\s+(run\s+)?(dev|start)|npm\s+start|pnpm\s+(dev|start)|yarn\s+(dev|start))\b/i.test(command)) {
+    const args = []
+    if (!hasHost) args.push('--host', '0.0.0.0')
+    if (!hasPort) args.push('--port', String(port))
+    return args.length ? appendArgs(command, args) : command
+  }
+
+  if (hasDependency(packageJson, 'next') && /^\s*(npm\s+(run\s+)?dev|pnpm\s+dev|yarn\s+dev)\b/i.test(command)) {
+    const args = []
+    if (!hasHost) args.push('--hostname', '0.0.0.0')
+    if (!hasPort) args.push('--port', String(port))
+    return args.length ? appendArgs(command, args) : command
+  }
+
+  if (/^\s*(npx\s+vite|vite)\b/i.test(command)) {
+    const args = []
+    if (!hasHost) args.push('--host', '0.0.0.0')
+    if (!hasPort) args.push('--port', String(port))
+    return args.length ? `${command} ${args.join(' ')}` : command
+  }
+
+  if (/^\s*(next\s+dev|npx\s+next\s+dev)\b/i.test(command)) {
+    const args = []
+    if (!hasHost) args.push('-H', '0.0.0.0')
+    if (!hasPort) args.push('-p', String(port))
+    return args.length ? `${command} ${args.join(' ')}` : command
+  }
+
+  return command
 }
 
 function commandUsesPython(command = '') {
@@ -904,6 +959,48 @@ function runnerEnv(sandbox, previewPort, targetPort = previewPort) {
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function fetchWithTimeout(url, timeoutMs = 2000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      cache: 'no-store',
+      headers: { 'cache-control': 'no-store' },
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function waitForPreviewReady(url, logs, timeoutMs = 30000) {
+  const start = Date.now()
+  let lastStatus = 'no response yet'
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const response = await fetchWithTimeout(url)
+      const body = await response.text().catch(() => '')
+      lastStatus = `HTTP ${response.status}`
+      if (response.status < 500 && !body.includes('Starting preview...')) {
+        logs.push(`Preview responded with ${lastStatus}.`)
+        return true
+      }
+    } catch (error) {
+      lastStatus = error?.name === 'AbortError' ? 'request timed out' : (error?.message || 'connection failed')
+    }
+
+    await delay(1000)
+  }
+
+  logs.push(`Preview was not ready after ${Math.round(timeoutMs / 1000)}s (${lastStatus}). The opened tab will keep retrying through the preview proxy.`)
+  return false
 }
 
 function commandWithRunnerEnv(command, sandbox, previewPort, targetPort = previewPort) {
@@ -1184,6 +1281,8 @@ async function startRunner(body, user) {
   })
 
   diagnostics.commandId = process.cmdId
+  const previewUrl = sandbox.domain(proxyPort)
+  diagnostics.previewReady = await waitForPreviewReady(previewUrl, logs)
 
   return {
     sandboxId: sandbox.sandboxId,
@@ -1193,7 +1292,7 @@ async function startRunner(body, user) {
     port: proxyPort,
     targetPort,
     proxyPort,
-    previewUrl: sandbox.domain(proxyPort),
+    previewUrl,
     logs: logs.join('\n'),
     diagnostics,
   }
