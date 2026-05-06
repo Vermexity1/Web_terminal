@@ -5337,6 +5337,7 @@ runpy.run_path(target, run_name="__main__")
     ['Command', cloudDiagnostics.command || 'not started'],
     ['Vite allowed host', cloudDiagnostics.viteAllowedHost || 'not available'],
     ['Runtime', cloudDiagnostics.runtime || 'not available'],
+    ['Compile check', cloudDiagnostics.compileCheck || 'not run'],
     ['Auto repairs', cloudDiagnostics.repairs?.length ? `${cloudDiagnostics.repairs.length} JSX repair(s)` : 'none'],
     ['Repairs saved', cloudDiagnostics.repairs?.length ? (cloudDiagnostics.repairsPersisted ? 'yes' : 'this run only') : 'none'],
   ]

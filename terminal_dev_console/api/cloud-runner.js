@@ -248,6 +248,84 @@ export function repairCommonJsxMistakes(files) {
   return { files: repairedFiles, repairs: uniqueRepairs }
 }
 
+export function parseBabelUnexpectedToken(output = '') {
+  const patterns = [
+    /\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx))["']?\s*:?\s*Unexpected token\s*\((\d+):(\d+)\)/i,
+    /\[plugin:vite:react-babel\]\s+\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):\s*Unexpected token\s*\((\d+):(\d+)\)/i,
+    /\/vercel\/sandbox\/([^"'\s:]+?\.(?:jsx|tsx)):(\d+):(\d+)/i,
+  ]
+
+  for (const pattern of patterns) {
+    const match = output.match(pattern)
+    if (match) {
+      return {
+        path: match[1].replaceAll('\\', '/').replace(/^\/+/, ''),
+        line: Number(match[2]) || 0,
+        column: Number(match[3]) || 0,
+      }
+    }
+  }
+
+  return null
+}
+
+function findFileIndex(files, targetPath) {
+  const normalizedTarget = String(targetPath || '').replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase()
+  return files.findIndex((file) => String(file.path || '').toLowerCase() === normalizedTarget)
+}
+
+export function repairJsxFromErrorLocation(files, output) {
+  const errorLocation = parseBabelUnexpectedToken(output)
+  const repairs = []
+  if (!errorLocation?.path || !errorLocation.line) return { files, repairs }
+
+  const fileIndex = findFileIndex(files, errorLocation.path)
+  if (fileIndex === -1) return { files, repairs }
+
+  const file = files[fileIndex]
+  const source = fileContent(file).toString('utf8')
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const lines = source.split(/\r?\n/)
+  const errorIndex = Math.max(0, Math.min(lines.length - 1, errorLocation.line - 1))
+  const searchStart = Math.max(0, errorIndex - 80)
+  let openingIndex = -1
+
+  for (let index = errorIndex; index >= searchStart; index -= 1) {
+    const braceIndex = lines[index].indexOf('{{')
+    if (braceIndex === -1) continue
+
+    const beforeBrace = lines[index].slice(0, braceIndex).trimEnd()
+    const alreadyAssigned = beforeBrace.endsWith('=') || /\bstyle\s*$/.test(beforeBrace)
+    if (!alreadyAssigned) {
+      openingIndex = index
+      break
+    }
+  }
+
+  if (openingIndex === -1) return { files, repairs }
+
+  const braceIndex = lines[openingIndex].indexOf('{{')
+  const blockText = lines.slice(openingIndex, Math.min(lines.length, errorIndex + 1)).join('\n')
+  if (!/:/.test(blockText)) return { files, repairs }
+
+  const indent = lines[openingIndex].match(/^\s*/)?.[0] || ''
+  lines[openingIndex] = lines[openingIndex].trim() === '{{'
+    ? `${indent}style={{`
+    : `${lines[openingIndex].slice(0, braceIndex)}style={{${lines[openingIndex].slice(braceIndex + 2)}`
+
+  repairs.push({
+    path: file.path,
+    line: openingIndex + 1,
+    message: 'Used the Vite compile error to add missing style= before a JSX object.',
+  })
+
+  const repairedFile = { ...file, data: lines.join(newline), encoding: 'utf8' }
+  return {
+    files: files.map((item, index) => (index === fileIndex ? repairedFile : item)),
+    repairs,
+  }
+}
+
 function directoryPaths(files) {
   const paths = new Set()
   files.forEach((file) => {
@@ -376,13 +454,25 @@ async function commandOutput(result) {
   return `${stdout || ''}${stderr || ''}`
 }
 
+async function runBuildCheck(sandbox, logs) {
+  logs.push('$ npm run build (compile check)')
+  const result = await sandbox.runCommand({
+    cmd: 'npm',
+    args: ['run', 'build'],
+    cwd: appRoot,
+    env: { NODE_ENV: 'development' },
+  })
+  const output = await commandOutput(result)
+  logs.push(output)
+  return { exitCode: result.exitCode, output }
+}
+
 async function startRunner(body, user) {
-  const repairResult = repairCommonJsxMistakes(sanitizeFiles(body.files || []))
-  const files = repairResult.files
+  let repairResult = repairCommonJsxMistakes(sanitizeFiles(body.files || []))
+  let files = repairResult.files
+  const repairs = [...repairResult.repairs]
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
-  const repairsPersisted = repairResult.repairs.length
-    ? await saveRepairedProjectFiles(user, body.projectId, files).catch(() => false)
-    : false
+  let repairsPersisted = false
 
   const targetPort = Number(body.port) || defaultPort
   const requestedProxyPort = Number(body.proxyPort) || defaultProxyPort
@@ -415,8 +505,9 @@ async function startRunner(body, user) {
     previewUrl: serverCommand ? sandbox.domain(proxyPort) : '',
     previewHost: serverCommand ? previewHost(sandbox, proxyPort) : '',
     viteAllowedHost: serverCommand ? viteAllowedHost(sandbox, proxyPort) : '',
-    repairs: repairResult.repairs,
+    repairs,
     repairsPersisted,
+    compileCheck: 'not run',
   }
 
   for (const dir of directoryPaths(files)) {
@@ -428,9 +519,8 @@ async function startRunner(body, user) {
     content: fileContent(file),
   })))
   logs.push(`Uploaded ${files.length} project files.`)
-  if (repairResult.repairs.length) {
-    logs.push(`Auto repair applied: ${repairResult.repairs.map((repair) => `${repair.path} (${repair.message})`).join('; ')}`)
-    logs.push(repairsPersisted ? 'Auto repair saved back to the project.' : 'Auto repair used for this run only.')
+  if (repairs.length) {
+    logs.push(`Auto repair applied before install: ${repairs.map((repair) => `${repair.path}${repair.line ? `:${repair.line}` : ''} (${repair.message})`).join('; ')}`)
   }
 
   if (body.install !== false && files.some((file) => file.path === 'package.json') && !isInstallCommand(command)) {
@@ -449,6 +539,44 @@ async function startRunner(body, user) {
         details: logs.join('\n'),
       })
     }
+  }
+
+  const packageJson = packageJsonFromFiles(files)
+  if (serverCommand && body.verify !== false && hasScript(packageJson, 'build')) {
+    const buildCheck = await runBuildCheck(sandbox, logs)
+    diagnostics.compileCheck = buildCheck.exitCode === 0 ? 'passed' : 'failed'
+
+    if (buildCheck.exitCode !== 0) {
+      const locationRepair = repairJsxFromErrorLocation(files, buildCheck.output)
+      if (locationRepair.repairs.length) {
+        files = locationRepair.files
+        repairs.push(...locationRepair.repairs)
+        diagnostics.repairs = repairs
+        logs.push(`Compile repair applied: ${locationRepair.repairs.map((repair) => `${repair.path}:${repair.line} (${repair.message})`).join('; ')}`)
+        await sandbox.writeFiles(files.map((file) => ({
+          path: file.path,
+          content: fileContent(file),
+        })))
+
+        const retryBuildCheck = await runBuildCheck(sandbox, logs)
+        diagnostics.compileCheck = retryBuildCheck.exitCode === 0 ? 'repaired' : 'failed after repair'
+        if (retryBuildCheck.exitCode !== 0 && parseBabelUnexpectedToken(retryBuildCheck.output)) {
+          await sandbox.stop({ blocking: false }).catch(() => {})
+          throw Object.assign(new Error('Vite still cannot compile this project after JSX auto-repair.'), {
+            status: 500,
+            details: logs.join('\n'),
+          })
+        }
+      } else {
+        logs.push('Compile check failed, but no safe JSX auto-repair matched the error. Starting dev server so the overlay can show the exact issue.')
+      }
+    }
+  }
+
+  if (repairs.length) {
+    repairsPersisted = await saveRepairedProjectFiles(user, body.projectId, files).catch(() => false)
+    diagnostics.repairsPersisted = repairsPersisted
+    logs.push(repairsPersisted ? 'Auto repair saved back to the project.' : 'Auto repair used for this run only.')
   }
 
   let proxyCommandId = ''
