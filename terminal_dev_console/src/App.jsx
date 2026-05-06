@@ -3749,7 +3749,7 @@ runpy.run_path(target, run_name="__main__")
 
     let files = activeCloudProject.files || []
     const previousSandboxId = cloudRunner.sandboxId
-    const useStoredFiles = options.useStoredFiles ?? options.openInNewTab ?? !webcontainer
+    const useStoredFiles = options.useStoredFiles ?? true
     let previewWindow = null
 
     if (options.openInNewTab) {
@@ -5438,6 +5438,7 @@ runpy.run_path(target, run_name="__main__")
   const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
   const framePreviewUrl = previewProxyUrl(displayPreviewUrl)
   const isProxiedPreview = Boolean(framePreviewUrl && framePreviewUrl !== displayPreviewUrl)
+  const preferCloudPreview = canUsePreviewProxy()
   const cloudDiagnostics = cloudRunner.diagnostics || {}
   const troubleshootRows = [
     ['Status', cloudRunner.status || 'idle'],
@@ -5555,9 +5556,9 @@ runpy.run_path(target, run_name="__main__")
           <button type="button" disabled={!webcontainer || isImporting} onClick={loadDemoGame}>Demo Game</button>
           <button type="button" disabled={!activeTab} onClick={runActiveFile}>Run File</button>
           <button type="button" onClick={() => runTerminalCommand('npm install')}>Install</button>
-          <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Run Dev</button>
-          <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Run Start</button>
-          <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud Run</button>
+          <button type="button" onClick={() => preferCloudPreview ? startCloudRunner('npm run dev') : webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Run Dev</button>
+          <button type="button" onClick={() => preferCloudPreview ? startCloudRunner('npm start') : webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Run Start</button>
+          <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
           <div className="view-switcher" role="group" aria-label="Visible sections">
             <button
               className={layoutMode === 'agentCode' && !isSettingsOpen ? 'is-active' : ''}
@@ -5703,7 +5704,7 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" onClick={() => window.location.reload()}>
               Reload and retry
             </button>
-            <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>
+            <button type="button" onClick={() => startCloudRunner()}>
               Run in Cloud
             </button>
           </div>
@@ -5780,7 +5781,7 @@ runpy.run_path(target, run_name="__main__")
               <span>Next: run npm scripts for web apps, or open a Python file and use Run File.</span>
               <button type="button" onClick={() => runTerminalCommand('npm install')}>npm install</button>
               <button type="button" onClick={runActiveFile} disabled={!activeTab}>Run File</button>
-              <button type="button" onClick={() => webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner('', { openInNewTab: true })}>
+              <button type="button" onClick={() => preferCloudPreview ? startCloudRunner(projectScripts.some((script) => script.command === 'npm run dev') ? 'npm run dev' : 'npm start') : webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner()}>
                 Run app
               </button>
               <button type="button" onClick={() => setShowOnboarding(false)}>Dismiss</button>
@@ -6018,7 +6019,7 @@ runpy.run_path(target, run_name="__main__")
                 </div>
                 <pre>{cloudRunner.logs || runtimeIssue?.message || 'The local browser runtime is blocked. Use Cloud Run to execute on Vercel Sandbox and stream the preview back here.'}</pre>
                 <div>
-                  <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud Run</button>
+                  <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
                   <button type="button" disabled={!cloudRunner.sandboxId} onClick={() => stopCloudRunner()}>Stop Cloud</button>
                 </div>
               </div>
@@ -6046,9 +6047,9 @@ runpy.run_path(target, run_name="__main__")
             <span>{devStatus}</span>
           </div>
           <div className="preview-actions">
-            <button type="button" title="Run npm run dev" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Dev</button>
-            <button type="button" title="Run npm run start" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Start</button>
-            <button type="button" title="Run on Vercel Sandbox for locked Chromebooks" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud</button>
+            <button type="button" title={preferCloudPreview ? 'Run npm run dev in Cloud Runner and play it here' : 'Run npm run dev'} onClick={() => preferCloudPreview ? startCloudRunner('npm run dev') : webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Dev</button>
+            <button type="button" title={preferCloudPreview ? 'Run npm start in Cloud Runner and play it here' : 'Run npm run start'} onClick={() => preferCloudPreview ? startCloudRunner('npm start') : webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Start</button>
+            <button type="button" title="Run on Vercel Sandbox for locked Chromebooks" onClick={() => startCloudRunner()}>Cloud</button>
             <button type="button" title="Stop dev server" onClick={() => { stopDevServer(); stopCloudRunner() }}>Stop</button>
             <button type="button" title="Retry the real WebContainer preview bridge" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair</button>
             <button type="button" title="Open preview in a new tab" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open</button>
@@ -6078,7 +6079,7 @@ runpy.run_path(target, run_name="__main__")
             <div className="preview-placeholder">
               <span>{previewStatus || 'Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.'}</span>
               {bridgePendingPort ? (
-                <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Restart managed dev server</button>
+                <button type="button" onClick={() => preferCloudPreview ? startCloudRunner('npm run dev') : webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Restart managed dev server</button>
               ) : null}
               <button type="button" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair preview bridge</button>
             </div>
