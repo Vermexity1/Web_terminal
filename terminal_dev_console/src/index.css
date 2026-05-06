@@ -1564,8 +1564,28 @@ button:disabled {
 .preview-placeholder {
   height: 100%;
   display: grid;
+  gap: 10px;
   place-items: center;
+  padding: 18px;
   background: #0b1017;
+  text-align: center;
+}
+
+.preview-placeholder span {
+  max-width: 34rem;
+  line-height: 1.5;
+}
+
+.preview-placeholder button {
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 6px;
+  color: #dce8f8;
+  background: rgba(37, 99, 235, 0.18);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
 }
 
 .start-screen {
@@ -2311,7 +2331,7 @@ button:disabled {
 .ai-actions button,
 .ai-command-list button,
 .ai-key-actions button {
-  height: 26px;
+  min-height: 26px;
   flex: 0 0 auto;
   border: 1px solid rgba(96, 165, 250, 0.3);
   border-radius: 5px;
@@ -2319,6 +2339,7 @@ button:disabled {
   background: rgba(8, 13, 20, 0.74);
   cursor: pointer;
   font-size: 0.7rem;
+  white-space: normal;
 }
 
 .ai-header button:hover,
@@ -2538,23 +2559,43 @@ button:disabled {
 .ai-chat-log {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: grid;
   align-content: start;
   justify-items: start;
-  gap: 8px;
-  padding: 6px;
+  gap: 14px;
+  padding: 8px 6px 10px;
+  scrollbar-gutter: stable;
+  scrollbar-color: #3b82f6 #05080d;
+  scrollbar-width: auto;
+}
+
+.ai-chat-log::-webkit-scrollbar {
+  width: 12px;
+}
+
+.ai-chat-log::-webkit-scrollbar-track {
+  background: #05080d;
+}
+
+.ai-chat-log::-webkit-scrollbar-thumb {
+  border: 3px solid #05080d;
+  border-radius: 999px;
+  background: #3b82f6;
 }
 
 .ai-message {
   position: relative;
-  width: max-content;
+  box-sizing: border-box;
+  width: fit-content;
   min-width: 0;
-  max-width: 100%;
-  padding: 10px 12px;
+  max-width: calc(100% - 12px);
+  padding: 11px 13px;
   border: 1px solid rgba(87, 107, 132, 0.22);
   border-radius: 10px;
   background: rgba(10, 15, 24, 0.78);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
   overflow-wrap: anywhere;
   text-align: left;
   word-break: break-word;
@@ -2562,7 +2603,7 @@ button:disabled {
 
 .ai-message.is-user {
   justify-self: end;
-  max-width: 100%;
+  max-width: calc(100% - 12px);
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(20, 55, 104, 0.72);
 }
@@ -2761,9 +2802,12 @@ button:disabled {
   gap: 7px;
   margin-top: 8px;
   padding: 7px;
+  max-width: 100%;
+  min-width: 0;
   border: 1px solid rgba(96, 165, 250, 0.18);
   border-radius: 6px;
   background: rgba(5, 8, 12, 0.48);
+  overflow-x: hidden;
 }
 
 .ai-plan-block strong {
@@ -2797,8 +2841,9 @@ button:disabled {
   background: rgba(59, 130, 246, 0.1);
   cursor: pointer;
   font-size: 0.66rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ai-review-list {
@@ -2815,12 +2860,15 @@ button:disabled {
   display: grid;
   gap: 5px;
   margin-top: 7px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .ai-change-list button {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 5px 6px;
@@ -2846,9 +2894,10 @@ button:disabled {
 .ai-change-list span,
 .ai-change-list small {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ai-change-list span {
@@ -2918,6 +2967,9 @@ button:disabled {
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 7px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .ai-edit-list code {
@@ -2928,8 +2980,9 @@ button:disabled {
   color: #93c5fd;
   background: rgba(59, 130, 246, 0.11);
   font-size: 0.68rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 @keyframes aiPanelSweep {
@@ -3041,19 +3094,53 @@ button:disabled {
 .preview-frame-wrap {
   display: none;
   min-height: 0;
+  position: relative;
   background: #eef3f9;
 }
 
 .preview-frame-wrap.is-active {
-  display: block;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .preview-frame-wrap iframe {
   width: 100%;
   height: 100%;
+  min-height: 0;
   display: block;
   border: 0;
   background: white;
+}
+
+.preview-live-bar {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  color: #9fb1c8;
+  border-top: 1px solid rgba(87, 107, 132, 0.24);
+  background: rgba(8, 13, 20, 0.94);
+  font-size: 0.72rem;
+}
+
+.preview-live-bar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-live-bar button {
+  flex: 0 0 auto;
+  height: 24px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 5px;
+  color: #dbeafe;
+  background: rgba(37, 99, 235, 0.18);
+  cursor: pointer;
+  font-size: 0.68rem;
 }
 
 .status-strip {

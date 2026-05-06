@@ -2174,6 +2174,7 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState('')
   const [previewKey, setPreviewKey] = useState(0)
   const [devStatus, setDevStatus] = useState('Stopped')
+  const [previewStatus, setPreviewStatus] = useState('Waiting for a dev server.')
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [operationStatus, setOperationStatus] = useState('')
@@ -2245,6 +2246,7 @@ export default function App() {
   const explorerPanelRef = useRef(null)
   const terminalPanelRef = useRef(null)
   const previewPanelRef = useRef(null)
+  const previewIframeRef = useRef(null)
   const commandSearchRef = useRef(null)
   const saveSnapshotTimerRef = useRef(null)
   const cloudSettingsTimerRef = useRef(null)
@@ -2292,6 +2294,7 @@ export default function App() {
     setPreviewUrl(url)
     setPreviewKey((key) => key + 1)
     setDevStatus(safePort ? `Running on ${safePort}` : 'Running')
+    setPreviewStatus(`Preview bridge connected${safePort ? ` on port ${safePort}` : ''}.`)
     setOperationStatus(`${source} preview connected${safePort ? ` on port ${safePort}` : ''}.`)
   }, [])
 
@@ -2310,6 +2313,7 @@ export default function App() {
       } else {
         pendingPreviewPortRef.current = previewSignal.port
         setDevStatus(`Server ready on ${previewSignal.port}`)
+        setPreviewStatus(`Server is ready on ${previewSignal.port}, but the browser preview bridge has not connected yet.`)
         setOperationStatus(`Detected a dev server on port ${previewSignal.port}. Waiting for WebContainer's preview bridge...`)
       }
     }
@@ -2577,6 +2581,7 @@ export default function App() {
 
       setDevStatus('Starting')
       setPreviewUrl('')
+      setPreviewStatus('Starting dev server and waiting for the preview bridge...')
       pendingPreviewPortRef.current = 0
       activePreviewPortRef.current = 0
       const npmArgs = getNpmServerArgs(script)
@@ -2607,6 +2612,7 @@ export default function App() {
     devProcessRef.current.kill()
     devProcessRef.current = null
     setDevStatus('Stopped')
+    setPreviewStatus('Preview stopped.')
   }, [writeTerminal])
 
   const saveAllDirtyTabs = useCallback(async (options = {}) => {
@@ -2849,6 +2855,7 @@ export default function App() {
       bootCleanupRef.current.unsubscribeServer?.()
       bootCleanupRef.current.unsubscribePort?.()
       bootCleanupRef.current.unsubscribeError?.()
+      bootCleanupRef.current.unsubscribePreviewMessage?.()
     }
 
     if (authLoading || !currentUser || !activeCloudProject) return cleanupBoot
@@ -2914,9 +2921,15 @@ export default function App() {
           setOperationStatus(`WebContainer error: ${error.message}`)
           addProblem('WebContainer', error.message)
         })
+        const unsubscribePreviewMessage = container.on('preview-message', (message) => {
+          const previewMessage = message?.message || message?.args?.join?.(' ') || 'Preview runtime error'
+          addProblem('Preview', previewMessage)
+          setPreviewStatus(`Preview reported: ${previewMessage}`)
+        })
         bootCleanupRef.current.unsubscribeServer = unsubscribeServer
         bootCleanupRef.current.unsubscribePort = unsubscribePort
         bootCleanupRef.current.unsubscribeError = unsubscribeError
+        bootCleanupRef.current.unsubscribePreviewMessage = unsubscribePreviewMessage
 
         setWebcontainer(container)
         await refreshExplorer(container)
@@ -3323,6 +3336,16 @@ runpy.run_path(target, run_name="__main__")
     if (direction === 'down') terminalApiRef.current?.scrollDown?.()
     if (direction === 'bottom') terminalApiRef.current?.scrollToBottom?.()
   }, [])
+
+  const openPreviewInNewTab = useCallback(() => {
+    if (!previewUrl) {
+      setPreviewStatus('No preview URL is available yet. Run Dev first and wait for the bridge URL.')
+      return
+    }
+
+    window.open(previewUrl, '_blank', 'noopener,noreferrer')
+    setPreviewStatus('Opened the preview in a new tab. This helps when a managed Chromebook blocks embedded iframes.')
+  }, [previewUrl])
 
   const exportProject = useCallback(async () => {
     if (!webcontainer || tree.length === 0) {
@@ -5235,15 +5258,33 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
             <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
+            <button type="button" title="Open preview in a new tab" disabled={!previewUrl} onClick={openPreviewInNewTab}>Open</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
         </div>
         <div className="preview-frame-wrap is-active">
           {previewUrl ? (
-            <iframe key={previewKey} title="WebContainer preview" src={previewUrl} />
+            <>
+              <iframe
+                key={previewKey}
+                ref={previewIframeRef}
+                title="WebContainer preview"
+                src={previewUrl}
+                allow="cross-origin-isolated; clipboard-read; clipboard-write"
+                onLoad={() => setPreviewStatus('Preview iframe loaded. If it is blank on a school Chromebook, use Open.')}
+                onError={() => setPreviewStatus('Preview iframe could not load. Try Open to launch it in a new tab.')}
+              />
+              <div className="preview-live-bar">
+                <span>{previewStatus}</span>
+                <button type="button" onClick={openPreviewInNewTab}>Open in tab</button>
+              </div>
+            </>
           ) : (
             <div className="preview-placeholder">
-              <span>Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.</span>
+              <span>{previewStatus || 'Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.'}</span>
+              {pendingPreviewPortRef.current ? (
+                <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Restart managed dev server</button>
+              ) : null}
             </div>
           )}
         </div>
