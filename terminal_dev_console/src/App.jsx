@@ -3721,6 +3721,7 @@ runpy.run_path(target, run_name="__main__")
     }
 
     let files = activeCloudProject.files || []
+    const previousSandboxId = cloudRunner.sandboxId
     setActiveActivity('preview')
     setBottomPanelTab('terminal')
     setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...', diagnostics: null }))
@@ -3729,6 +3730,14 @@ runpy.run_path(target, run_name="__main__")
     writeTerminal('\r\n\x1b[1;36mStarting Cloud Runner on Vercel Sandbox...\x1b[0m\r\n')
 
     try {
+      if (previousSandboxId) {
+        setPreviewStatus('Stopping the previous cloud sandbox first...')
+        await apiRequest('/api/cloud-runner', {
+          method: 'POST',
+          body: { action: 'stop', sandboxId: previousSandboxId },
+        }).catch(() => {})
+      }
+
       if (webcontainer) {
         await saveAllDirtyTabs({ silent: true })
         files = await readWorkspaceFiles(webcontainer)
@@ -3777,7 +3786,7 @@ runpy.run_path(target, run_name="__main__")
       setPreviewStatus(`Cloud Runner failed: ${error.message}`)
       addProblem('Cloud Runner', error.message)
     }
-  }, [activeCloudProject, addProblem, clearStaticPreview, saveAllDirtyTabs, webcontainer, writeTerminal])
+  }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, saveAllDirtyTabs, webcontainer, writeTerminal])
 
   const runTerminalCommand = useCallback((command) => {
     const pythonRequest = getPythonCommandRequest(command)
@@ -5329,6 +5338,7 @@ runpy.run_path(target, run_name="__main__")
     ['Vite allowed host', cloudDiagnostics.viteAllowedHost || 'not available'],
     ['Runtime', cloudDiagnostics.runtime || 'not available'],
     ['Auto repairs', cloudDiagnostics.repairs?.length ? `${cloudDiagnostics.repairs.length} JSX repair(s)` : 'none'],
+    ['Repairs saved', cloudDiagnostics.repairs?.length ? (cloudDiagnostics.repairsPersisted ? 'yes' : 'this run only') : 'none'],
   ]
 
   if (authLoading) {

@@ -4,6 +4,7 @@ import {
   json,
   readJsonBody,
   sanitizeFiles,
+  updateStore,
 } from './_store.js'
 
 const defaultPort = 5173
@@ -141,12 +142,40 @@ function repairBareJsxStyleBlocks(source, filePath, repairs) {
   let changed = false
 
   for (let index = 0; index < lines.length; index += 1) {
-    if (lines[index].trim() !== '{{') continue
+    const braceIndex = lines[index].indexOf('{{')
+    if (braceIndex === -1) continue
+
+    const beforeBrace = lines[index].slice(0, braceIndex).trimEnd()
+    const lastCharBeforeBrace = beforeBrace.at(-1) || ''
+    const alreadyAssigned = lastCharBeforeBrace === '=' || /\bstyle\s*$/.test(beforeBrace)
+    const trimmedLine = lines[index].trim()
+    const bareStyleCandidate = trimmedLine === '{{'
+      || (trimmedLine.startsWith('{{') && !alreadyAssigned)
+      || (
+        !alreadyAssigned
+          && /<[\w.-]+|^\s+[A-Za-z_$:-]/.test(beforeBrace)
+      )
+
+    if (!bareStyleCandidate) continue
+
+    const openingRemainder = lines[index].slice(braceIndex + 2)
+    if (openingRemainder.includes('}}') && jsxStylePropertyPattern.test(openingRemainder)) {
+      lines[index] = trimmedLine === '{{'
+        ? `${lines[index].match(/^\s*/)?.[0] || ''}style={{${openingRemainder}`
+        : `${lines[index].slice(0, braceIndex)}style={{${openingRemainder}`
+      changed = true
+      rememberRepair(repairs, {
+        path: filePath,
+        line: index + 1,
+        message: 'Added missing style= before an inline JSX style object.',
+      })
+      continue
+    }
 
     let closeIndex = -1
     for (let cursor = index + 1; cursor < Math.min(lines.length, index + 60); cursor += 1) {
       const trimmed = lines[cursor].trim()
-      if (trimmed === '}}') {
+      if (trimmed === '}}' || trimmed.startsWith('}}>') || trimmed.endsWith('}}')) {
         closeIndex = cursor
         break
       }
@@ -156,10 +185,12 @@ function repairBareJsxStyleBlocks(source, filePath, repairs) {
     if (closeIndex === -1) continue
 
     const body = lines.slice(index + 1, closeIndex).join('\n')
-    if (!jsxStylePropertyPattern.test(body)) continue
+    if (!jsxStylePropertyPattern.test(`${openingRemainder}\n${body}`)) continue
 
     const indent = lines[index].match(/^\s*/)?.[0] || ''
-    lines[index] = `${indent}style={{`
+    lines[index] = trimmedLine === '{{'
+      ? `${indent}style={{`
+      : `${lines[index].slice(0, braceIndex)}style={{${lines[index].slice(braceIndex + 2)}`
     changed = true
     rememberRepair(repairs, {
       path: filePath,
@@ -240,6 +271,23 @@ function packageJsonFromFiles(files) {
   } catch {
     return null
   }
+}
+
+async function saveRepairedProjectFiles(user, projectId, files) {
+  if (!user?.id || !projectId) return false
+
+  const result = await updateStore((store) => {
+    const project = store.projects[String(projectId)]
+    if (!project || project.userId !== user.id) return { saved: false }
+
+    const now = Date.now()
+    project.files = sanitizeFiles(files)
+    project.updatedAt = now
+    project.lastOpenedAt = now
+    return { saved: true }
+  })
+
+  return Boolean(result.saved)
 }
 
 function hasScript(packageJson, script) {
@@ -328,10 +376,13 @@ async function commandOutput(result) {
   return `${stdout || ''}${stderr || ''}`
 }
 
-async function startRunner(body) {
+async function startRunner(body, user) {
   const repairResult = repairCommonJsxMistakes(sanitizeFiles(body.files || []))
   const files = repairResult.files
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
+  const repairsPersisted = repairResult.repairs.length
+    ? await saveRepairedProjectFiles(user, body.projectId, files).catch(() => false)
+    : false
 
   const targetPort = Number(body.port) || defaultPort
   const requestedProxyPort = Number(body.proxyPort) || defaultProxyPort
@@ -365,6 +416,7 @@ async function startRunner(body) {
     previewHost: serverCommand ? previewHost(sandbox, proxyPort) : '',
     viteAllowedHost: serverCommand ? viteAllowedHost(sandbox, proxyPort) : '',
     repairs: repairResult.repairs,
+    repairsPersisted,
   }
 
   for (const dir of directoryPaths(files)) {
@@ -378,6 +430,7 @@ async function startRunner(body) {
   logs.push(`Uploaded ${files.length} project files.`)
   if (repairResult.repairs.length) {
     logs.push(`Auto repair applied: ${repairResult.repairs.map((repair) => `${repair.path} (${repair.message})`).join('; ')}`)
+    logs.push(repairsPersisted ? 'Auto repair saved back to the project.' : 'Auto repair used for this run only.')
   }
 
   if (body.install !== false && files.some((file) => file.path === 'package.json') && !isInstallCommand(command)) {
@@ -517,7 +570,7 @@ async function runnerStatus(req) {
 
 export default async function handler(req, res) {
   try {
-    await requireUser(req)
+    const user = await requireUser(req)
 
     if (req.method === 'GET') {
       json(res, 200, await runnerStatus(req))
@@ -533,7 +586,7 @@ export default async function handler(req, res) {
     const action = body.action || 'start'
 
     if (action === 'start') {
-      json(res, 200, await startRunner(body))
+      json(res, 200, await startRunner(body, user))
       return
     }
 
