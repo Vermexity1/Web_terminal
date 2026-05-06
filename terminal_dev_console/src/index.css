@@ -3412,6 +3412,12 @@ button:disabled {
   white-space: nowrap;
 }
 
+.preview-live-bar small {
+  flex: 0 0 auto;
+  color: #60a5fa;
+  font-size: 0.68rem;
+}
+
 .preview-live-bar button {
   flex: 0 0 auto;
   height: 24px;

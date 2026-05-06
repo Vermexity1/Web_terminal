@@ -1396,6 +1396,24 @@ function buildStaticPreview(files) {
   return { url: htmlUrl, urls }
 }
 
+function canUsePreviewProxy() {
+  const host = window.location.hostname
+  return !['localhost', '127.0.0.1', '::1'].includes(host)
+}
+
+function previewProxyUrl(url) {
+  if (!url || /^(blob:|data:)/i.test(url) || !canUsePreviewProxy()) return url
+
+  try {
+    const targetUrl = new URL(url)
+    if (!['http:', 'https:'].includes(targetUrl.protocol)) return url
+    if (targetUrl.origin === window.location.origin) return url
+    return `/api/preview-proxy?url=${encodeURIComponent(targetUrl.href)}`
+  } catch {
+    return url
+  }
+}
+
 function detectFramework(packageJson) {
   const dependencies = {
     ...packageJson.dependencies,
@@ -5418,6 +5436,8 @@ runpy.run_path(target, run_name="__main__")
 
   const displayPreviewUrl = previewUrl || cloudRunner.previewUrl || staticPreviewUrl
   const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
+  const framePreviewUrl = previewProxyUrl(displayPreviewUrl)
+  const isProxiedPreview = Boolean(framePreviewUrl && framePreviewUrl !== displayPreviewUrl)
   const cloudDiagnostics = cloudRunner.diagnostics || {}
   const troubleshootRows = [
     ['Status', cloudRunner.status || 'idle'],
@@ -6041,15 +6061,17 @@ runpy.run_path(target, run_name="__main__")
               <iframe
                 key={previewKey}
                 ref={previewIframeRef}
-                title={isStaticPreview ? 'Static fallback preview' : 'WebContainer preview'}
-                src={displayPreviewUrl}
+                title={isStaticPreview ? 'Static fallback preview' : 'On-page project preview'}
+                src={framePreviewUrl}
                 allow="cross-origin-isolated; clipboard-read; clipboard-write"
-                onLoad={() => setPreviewStatus(isStaticPreview ? 'Static preview iframe loaded.' : 'Preview iframe loaded. If it is blank on a school Chromebook, use Open.')}
-                onError={() => setPreviewStatus('Preview iframe could not load. Try Open to launch it in a new tab.')}
+                sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
+                onLoad={() => setPreviewStatus(isStaticPreview ? 'Static preview loaded on this page.' : isProxiedPreview ? 'Preview is playing on this page through the browser-safe proxy.' : 'Preview loaded on this page.')}
+                onError={() => setPreviewStatus('Preview could not load on this page. Try Cloud or Open.')}
               />
               <div className="preview-live-bar">
                 <span>{previewStatus}</span>
-                <button type="button" onClick={openPreviewInNewTab}>Open in tab</button>
+                {isProxiedPreview ? <small>Same-page proxy</small> : null}
+                <button type="button" onClick={openPreviewInNewTab}>Open raw</button>
               </div>
             </>
           ) : (
