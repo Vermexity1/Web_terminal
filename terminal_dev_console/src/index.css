@@ -2561,10 +2561,11 @@ button:disabled {
   overflow-y: auto;
   overflow-x: hidden;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   justify-items: start;
-  gap: 14px;
-  padding: 8px 6px 10px;
+  gap: 18px;
+  padding: 10px 8px 14px;
   scrollbar-gutter: stable;
   scrollbar-color: #3b82f6 #05080d;
   scrollbar-width: auto;
@@ -2588,22 +2589,27 @@ button:disabled {
   position: relative;
   box-sizing: border-box;
   width: fit-content;
-  min-width: 0;
-  max-width: calc(100% - 12px);
-  padding: 11px 13px;
+  min-width: min(180px, 78%);
+  max-width: min(430px, 86%);
+  min-height: 42px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 12px 15px;
   border: 1px solid rgba(87, 107, 132, 0.22);
-  border-radius: 10px;
+  border-radius: 12px;
   background: rgba(10, 15, 24, 0.78);
   overflow-x: hidden;
   overflow-y: visible;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: center;
   word-break: break-word;
 }
 
 .ai-message.is-user {
   justify-self: end;
-  max-width: calc(100% - 12px);
+  max-width: min(430px, 86%);
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(20, 55, 104, 0.72);
 }
@@ -2661,8 +2667,9 @@ button:disabled {
   color: #dce8f8;
   font-size: 0.78rem;
   line-height: 1.5;
+  max-width: 100%;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: center;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2672,6 +2679,7 @@ button:disabled {
   color: #8fa0b3;
   font-size: 0.66rem;
   overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .ai-working-visual {
@@ -2799,6 +2807,7 @@ button:disabled {
 
 .ai-plan-block {
   display: grid;
+  justify-self: stretch;
   gap: 7px;
   margin-top: 8px;
   padding: 7px;
@@ -2808,6 +2817,7 @@ button:disabled {
   border-radius: 6px;
   background: rgba(5, 8, 12, 0.48);
   overflow-x: hidden;
+  text-align: left;
 }
 
 .ai-plan-block strong {
@@ -2823,6 +2833,7 @@ button:disabled {
   color: #cbd5e1;
   font-size: 0.68rem;
   line-height: 1.42;
+  text-align: left;
 }
 
 .ai-plan-files {
@@ -2847,6 +2858,7 @@ button:disabled {
 }
 
 .ai-review-list {
+  justify-self: stretch;
   display: grid;
   gap: 4px;
   margin: 8px 0 0;
@@ -2854,9 +2866,11 @@ button:disabled {
   color: #9fb7d6;
   font-size: 0.66rem;
   line-height: 1.4;
+  text-align: left;
 }
 
 .ai-change-list {
+  justify-self: stretch;
   display: grid;
   gap: 5px;
   margin-top: 7px;
@@ -2877,6 +2891,7 @@ button:disabled {
   color: #dce8f8;
   background: rgba(5, 8, 12, 0.62);
   cursor: pointer;
+  text-align: left;
 }
 
 .ai-message.is-proposed .ai-change-list button {
@@ -2898,6 +2913,7 @@ button:disabled {
   overflow-wrap: anywhere;
   text-overflow: clip;
   white-space: normal;
+  text-align: left;
 }
 
 .ai-change-list span {
@@ -2912,6 +2928,7 @@ button:disabled {
 }
 
 .ai-change-summary {
+  justify-self: stretch;
   border: 1px solid rgba(87, 107, 132, 0.22);
   border-radius: 6px;
   padding: 8px;
@@ -2963,6 +2980,7 @@ button:disabled {
 
 .ai-edit-list,
 .ai-command-list {
+  justify-self: stretch;
   display: flex;
   flex-wrap: wrap;
   gap: 5px;

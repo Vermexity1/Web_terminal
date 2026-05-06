@@ -1263,6 +1263,115 @@ async function downloadWorkspaceZip(webcontainer, name) {
   URL.revokeObjectURL(url)
 }
 
+function mimeTypeForPath(path) {
+  const extension = fileExtension(path)
+  if (extension === '.html') return 'text/html'
+  if (extension === '.js' || extension === '.mjs') return 'text/javascript'
+  if (extension === '.css') return 'text/css'
+  if (extension === '.json') return 'application/json'
+  if (extension === '.svg') return 'image/svg+xml'
+  if (extension === '.png') return 'image/png'
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
+  if (extension === '.gif') return 'image/gif'
+  if (extension === '.webp') return 'image/webp'
+  return 'application/octet-stream'
+}
+
+function resolvePreviewPath(fromPath, target) {
+  if (!target || /^(https?:|data:|blob:|#)/i.test(target)) return target
+  if (target.startsWith('/')) return normalizePath(target)
+  const base = parentPath(fromPath)
+  const stack = `${base}/${target}`.split('/').filter(Boolean)
+  const resolved = []
+
+  for (const part of stack) {
+    if (part === '.') continue
+    if (part === '..') {
+      resolved.pop()
+      continue
+    }
+    resolved.push(part)
+  }
+
+  return resolved.join('/')
+}
+
+function buildStaticPreview(files) {
+  const decoder = new TextDecoder()
+  const urls = []
+  const fileMap = new Map(files.map((file) => [normalizePath(file.path), file.data]))
+  const moduleUrlCache = new Map()
+  const rawUrlCache = new Map()
+  const indexPath = ['index.html', 'public/index.html'].find((path) => fileMap.has(path))
+
+  if (!indexPath) {
+    throw new Error('Static preview needs an index.html file.')
+  }
+
+  const textForPath = (path) => decoder.decode(fileMap.get(path) || new Uint8Array())
+  const makeObjectUrl = (data, type) => {
+    const url = URL.createObjectURL(new Blob([data], { type }))
+    urls.push(url)
+    return url
+  }
+
+  const getRawUrl = (path) => {
+    const normalizedPath = normalizePath(path)
+    if (!fileMap.has(normalizedPath)) return ''
+    if (rawUrlCache.has(normalizedPath)) return rawUrlCache.get(normalizedPath)
+    const url = makeObjectUrl(fileMap.get(normalizedPath), mimeTypeForPath(normalizedPath))
+    rawUrlCache.set(normalizedPath, url)
+    return url
+  }
+
+  const getModuleUrl = (path) => {
+    const normalizedPath = normalizePath(path)
+    if (!fileMap.has(normalizedPath)) return ''
+    if (moduleUrlCache.has(normalizedPath)) return moduleUrlCache.get(normalizedPath)
+
+    let code = textForPath(normalizedPath)
+    code = code.replace(/import\s+['"]([^'"]+\.css)['"]\s*;?/g, (_, specifier) => {
+      const cssPath = resolvePreviewPath(normalizedPath, specifier)
+      const css = fileMap.has(cssPath) ? JSON.stringify(textForPath(cssPath)) : '""'
+      return `const style=document.createElement("style");style.textContent=${css};document.head.append(style);`
+    })
+    code = code.replace(/(from\s+['"])(\.{1,2}\/[^'"]+)(['"])/g, (match, before, specifier, after) => {
+      const targetPath = resolvePreviewPath(normalizedPath, specifier)
+      const targetUrl = getModuleUrl(targetPath) || getRawUrl(targetPath)
+      return targetUrl ? `${before}${targetUrl}${after}` : match
+    })
+    code = code.replace(/(import\s*\(\s*['"])(\.{1,2}\/[^'"]+)(['"]\s*\))/g, (match, before, specifier, after) => {
+      const targetPath = resolvePreviewPath(normalizedPath, specifier)
+      const targetUrl = getModuleUrl(targetPath) || getRawUrl(targetPath)
+      return targetUrl ? `${before}${targetUrl}${after}` : match
+    })
+
+    const url = makeObjectUrl(code, 'text/javascript')
+    moduleUrlCache.set(normalizedPath, url)
+    return url
+  }
+
+  let html = textForPath(indexPath)
+  html = html.replace(/(<script\b[^>]*\bsrc=["'])([^"']+)(["'][^>]*><\/script>)/gi, (match, before, src, after) => {
+    const path = resolvePreviewPath(indexPath, src)
+    const url = getModuleUrl(path) || getRawUrl(path)
+    return url ? `${before}${url}${after}` : match
+  })
+  html = html.replace(/(<link\b[^>]*\bhref=["'])([^"']+)(["'][^>]*>)/gi, (match, before, href, after) => {
+    const path = resolvePreviewPath(indexPath, href)
+    const url = getRawUrl(path)
+    return url ? `${before}${url}${after}` : match
+  })
+  html = html.replace(/(<(?:img|source|video|audio)\b[^>]*\bsrc=["'])([^"']+)(["'][^>]*>)/gi, (match, before, src, after) => {
+    const path = resolvePreviewPath(indexPath, src)
+    const url = getRawUrl(path)
+    return url ? `${before}${url}${after}` : match
+  })
+
+  const htmlUrl = makeObjectUrl(html, 'text/html')
+  return { url: htmlUrl, urls }
+}
+
 function detectFramework(packageJson) {
   const dependencies = {
     ...packageJson.dependencies,
@@ -2172,9 +2281,11 @@ export default function App() {
   const [tabs, setTabs] = useState([])
   const [activePath, setActivePath] = useState('')
   const [previewUrl, setPreviewUrl] = useState('')
+  const [staticPreviewUrl, setStaticPreviewUrl] = useState('')
   const [previewKey, setPreviewKey] = useState(0)
   const [devStatus, setDevStatus] = useState('Stopped')
   const [previewStatus, setPreviewStatus] = useState('Waiting for a dev server.')
+  const [bridgePendingPort, setBridgePendingPort] = useState(0)
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [operationStatus, setOperationStatus] = useState('')
@@ -2255,6 +2366,7 @@ export default function App() {
   const previewUrlsByPortRef = useRef(new Map())
   const activePreviewPortRef = useRef(0)
   const pendingPreviewPortRef = useRef(0)
+  const staticPreviewUrlsRef = useRef([])
   const lastProblemRef = useRef('')
   const projectNameRef = useRef(projectName)
 
@@ -2265,6 +2377,12 @@ export default function App() {
     }
 
     bufferedTerminalOutputRef.current += data
+  }, [clearStaticPreview])
+
+  const clearStaticPreview = useCallback(() => {
+    staticPreviewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    staticPreviewUrlsRef.current = []
+    setStaticPreviewUrl('')
   }, [])
 
   const addProblem = useCallback((source, message) => {
@@ -2289,14 +2407,16 @@ export default function App() {
       previewUrlsByPortRef.current.set(safePort, url)
       activePreviewPortRef.current = safePort
       pendingPreviewPortRef.current = 0
+      setBridgePendingPort(0)
     }
 
+    clearStaticPreview()
     setPreviewUrl(url)
     setPreviewKey((key) => key + 1)
     setDevStatus(safePort ? `Running on ${safePort}` : 'Running')
     setPreviewStatus(`Preview bridge connected${safePort ? ` on port ${safePort}` : ''}.`)
     setOperationStatus(`${source} preview connected${safePort ? ` on port ${safePort}` : ''}.`)
-  }, [])
+  }, [clearStaticPreview])
 
   const inspectProcessOutput = useCallback((source, data) => {
     const text = String(data)
@@ -2312,8 +2432,9 @@ export default function App() {
         connectPreview(previewSignal.port, bridgedUrl, source)
       } else {
         pendingPreviewPortRef.current = previewSignal.port
+        setBridgePendingPort(previewSignal.port)
         setDevStatus(`Server ready on ${previewSignal.port}`)
-        setPreviewStatus(`Server is ready on ${previewSignal.port}, but the browser preview bridge has not connected yet.`)
+        setPreviewStatus(`Server is ready on ${previewSignal.port}, but the browser preview bridge has not connected yet. Trying static preview fallback...`)
         setOperationStatus(`Detected a dev server on port ${previewSignal.port}. Waiting for WebContainer's preview bridge...`)
       }
     }
@@ -2323,7 +2444,7 @@ export default function App() {
         addProblem(source, line)
       }
     })
-  }, [addProblem, connectPreview])
+  }, [addProblem, clearStaticPreview, connectPreview])
 
   const applyCloudSettings = useCallback((settings = {}) => {
     if (settings.theme) setTheme(settings.theme)
@@ -2581,8 +2702,10 @@ export default function App() {
 
       setDevStatus('Starting')
       setPreviewUrl('')
+      clearStaticPreview()
       setPreviewStatus('Starting dev server and waiting for the preview bridge...')
       pendingPreviewPortRef.current = 0
+      setBridgePendingPort(0)
       activePreviewPortRef.current = 0
       const npmArgs = getNpmServerArgs(script)
       writeTerminal(`\r\n\x1b[1;34m$ npm ${npmArgs.join(' ')}\x1b[0m\r\n`)
@@ -2603,7 +2726,7 @@ export default function App() {
         }
       })
     },
-    [getNpmServerArgs, inspectProcessOutput, webcontainer, writeTerminal],
+    [clearStaticPreview, getNpmServerArgs, inspectProcessOutput, webcontainer, writeTerminal],
   )
 
   const stopDevServer = useCallback(() => {
@@ -2612,6 +2735,7 @@ export default function App() {
     devProcessRef.current.kill()
     devProcessRef.current = null
     setDevStatus('Stopped')
+    setBridgePendingPort(0)
     setPreviewStatus('Preview stopped.')
   }, [writeTerminal])
 
@@ -2824,6 +2948,8 @@ export default function App() {
     return () => {
       window.clearTimeout(saveSnapshotTimerRef.current)
       window.clearTimeout(cloudSettingsTimerRef.current)
+      staticPreviewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+      staticPreviewUrlsRef.current = []
     }
   }, [])
 
@@ -2912,6 +3038,7 @@ export default function App() {
             previewUrlsByPortRef.current.delete(Number(port))
             if (activePreviewPortRef.current === Number(port)) {
               activePreviewPortRef.current = 0
+              setBridgePendingPort(0)
               setPreviewUrl('')
               setDevStatus('Stopped')
             }
@@ -3338,14 +3465,48 @@ runpy.run_path(target, run_name="__main__")
   }, [])
 
   const openPreviewInNewTab = useCallback(() => {
-    if (!previewUrl) {
+    const url = previewUrl || staticPreviewUrl
+    if (!url) {
       setPreviewStatus('No preview URL is available yet. Run Dev first and wait for the bridge URL.')
       return
     }
 
-    window.open(previewUrl, '_blank', 'noopener,noreferrer')
+    window.open(url, '_blank', 'noopener,noreferrer')
     setPreviewStatus('Opened the preview in a new tab. This helps when a managed Chromebook blocks embedded iframes.')
-  }, [previewUrl])
+  }, [previewUrl, staticPreviewUrl])
+
+  const buildStaticPreviewFallback = useCallback(async (options = {}) => {
+    if (!webcontainer) {
+      setPreviewStatus('The workspace is still starting. Try again when the terminal is ready.')
+      return
+    }
+
+    try {
+      await saveAllDirtyTabs({ silent: true })
+      const files = await readWorkspaceFiles(webcontainer)
+      const preview = buildStaticPreview(files)
+      clearStaticPreview()
+      staticPreviewUrlsRef.current = preview.urls
+      setStaticPreviewUrl(preview.url)
+      setPreviewKey((key) => key + 1)
+      setPreviewStatus('Static preview fallback loaded from your files. Dev-server features like HMR may not work here.')
+      if (!options.silent) setOperationStatus('Static preview fallback loaded.')
+    } catch (error) {
+      const message = error?.message || 'Static preview fallback failed.'
+      setPreviewStatus(`Static preview fallback failed: ${message}`)
+      addProblem('Static Preview', message)
+    }
+  }, [addProblem, clearStaticPreview, saveAllDirtyTabs, webcontainer])
+
+  useEffect(() => {
+    if (!bridgePendingPort || previewUrl || staticPreviewUrl || !webcontainer) return undefined
+
+    const timer = window.setTimeout(() => {
+      buildStaticPreviewFallback({ silent: true })
+    }, 2500)
+
+    return () => window.clearTimeout(timer)
+  }, [bridgePendingPort, buildStaticPreviewFallback, previewUrl, staticPreviewUrl, webcontainer])
 
   const exportProject = useCallback(async () => {
     if (!webcontainer || tree.length === 0) {
@@ -4196,6 +4357,8 @@ runpy.run_path(target, run_name="__main__")
         setActivePath('')
         setSelectedPath('')
         setPreviewUrl('')
+        clearStaticPreview()
+        setBridgePendingPort(0)
         setPreviewKey((key) => key + 1)
         setProjectName(name)
         await refreshExplorer(webcontainer)
@@ -4218,7 +4381,7 @@ runpy.run_path(target, run_name="__main__")
         setIsImporting(false)
       }
     },
-    [detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, stopDevServer, webcontainer, writeTerminal],
+    [clearStaticPreview, detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, stopDevServer, webcontainer, writeTerminal],
   )
 
   const restoreSavedProject = useCallback(async () => {
@@ -4723,6 +4886,9 @@ runpy.run_path(target, run_name="__main__")
       </div>
     </section>
   )
+
+  const displayPreviewUrl = previewUrl || staticPreviewUrl
+  const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
 
   if (authLoading) {
     return (
@@ -5258,20 +5424,21 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
             <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
-            <button type="button" title="Open preview in a new tab" disabled={!previewUrl} onClick={openPreviewInNewTab}>Open</button>
+            <button type="button" title="Build static preview fallback" disabled={!webcontainer} onClick={() => buildStaticPreviewFallback()}>Static</button>
+            <button type="button" title="Open preview in a new tab" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
         </div>
         <div className="preview-frame-wrap is-active">
-          {previewUrl ? (
+          {displayPreviewUrl ? (
             <>
               <iframe
                 key={previewKey}
                 ref={previewIframeRef}
-                title="WebContainer preview"
-                src={previewUrl}
+                title={isStaticPreview ? 'Static fallback preview' : 'WebContainer preview'}
+                src={displayPreviewUrl}
                 allow="cross-origin-isolated; clipboard-read; clipboard-write"
-                onLoad={() => setPreviewStatus('Preview iframe loaded. If it is blank on a school Chromebook, use Open.')}
+                onLoad={() => setPreviewStatus(isStaticPreview ? 'Static preview iframe loaded.' : 'Preview iframe loaded. If it is blank on a school Chromebook, use Open.')}
                 onError={() => setPreviewStatus('Preview iframe could not load. Try Open to launch it in a new tab.')}
               />
               <div className="preview-live-bar">
@@ -5282,9 +5449,10 @@ runpy.run_path(target, run_name="__main__")
           ) : (
             <div className="preview-placeholder">
               <span>{previewStatus || 'Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.'}</span>
-              {pendingPreviewPortRef.current ? (
+              {bridgePendingPort ? (
                 <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Restart managed dev server</button>
               ) : null}
+              <button type="button" disabled={!webcontainer} onClick={() => buildStaticPreviewFallback()}>Try static preview</button>
             </div>
           )}
         </div>
