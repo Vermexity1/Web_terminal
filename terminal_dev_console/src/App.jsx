@@ -1309,6 +1309,26 @@ function buildStaticPreview(files) {
   }
 
   const textForPath = (path) => decoder.decode(fileMap.get(path) || new Uint8Array())
+  const indexHtml = textForPath(indexPath)
+  const scriptSources = [...indexHtml.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi)]
+    .map((match) => resolvePreviewPath(indexPath, match[1]))
+    .filter(Boolean)
+  const jsxEntry = scriptSources.find((path) => /\.(jsx|tsx)$/i.test(path))
+
+  if (jsxEntry) {
+    throw new Error(`Static preview cannot run ${jsxEntry}. Use Dev or Start so Vite can compile JSX.`)
+  }
+
+  const bareImportEntry = scriptSources.find((path) => {
+    if (!/\.[cm]?js$/i.test(path) || !fileMap.has(path)) return false
+    const code = textForPath(path)
+    return /(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](?!\.{1,2}\/|\/|https?:|data:|blob:)[^'"]+['"]/m.test(code)
+  })
+
+  if (bareImportEntry) {
+    throw new Error(`Static preview cannot run bare imports in ${bareImportEntry}. Use Dev or Start so Vite can bundle dependencies.`)
+  }
+
   const makeObjectUrl = (data, type) => {
     const url = URL.createObjectURL(new Blob([data], { type }))
     urls.push(url)
@@ -1351,7 +1371,7 @@ function buildStaticPreview(files) {
     return url
   }
 
-  let html = textForPath(indexPath)
+  let html = indexHtml
   html = html.replace(/(<script\b[^>]*\bsrc=["'])([^"']+)(["'][^>]*><\/script>)/gi, (match, before, src, after) => {
     const path = resolvePreviewPath(indexPath, src)
     const url = getModuleUrl(path) || getRawUrl(path)
@@ -2434,7 +2454,7 @@ export default function App() {
         pendingPreviewPortRef.current = previewSignal.port
         setBridgePendingPort(previewSignal.port)
         setDevStatus(`Server ready on ${previewSignal.port}`)
-        setPreviewStatus(`Server is ready on ${previewSignal.port}, but the browser preview bridge has not connected yet. Trying static preview fallback...`)
+        setPreviewStatus(`Server is ready on ${previewSignal.port}. Waiting for the WebContainer preview bridge URL...`)
         setOperationStatus(`Detected a dev server on port ${previewSignal.port}. Waiting for WebContainer's preview bridge...`)
       }
     }
@@ -3026,9 +3046,11 @@ export default function App() {
         setBootStatus('Connecting runtime services...')
 
         unsubscribeServer = container.on('server-ready', (port, url) => {
+          writeTerminal(`\r\n\x1b[2m[preview] server-ready ${port}: ${url}\x1b[0m\r\n`)
           connectPreview(port, url, 'WebContainer')
         })
         unsubscribePort = container.on('port', (port, type, url) => {
+          writeTerminal(`\r\n\x1b[2m[preview] port ${type} ${port}${url ? `: ${url}` : ''}\x1b[0m\r\n`)
           if (type === 'open') {
             previewUrlsByPortRef.current.set(Number(port), url)
             if (!activePreviewPortRef.current || pendingPreviewPortRef.current === Number(port)) {
@@ -3498,15 +3520,25 @@ runpy.run_path(target, run_name="__main__")
     }
   }, [addProblem, clearStaticPreview, saveAllDirtyTabs, webcontainer])
 
-  useEffect(() => {
-    if (!bridgePendingPort || previewUrl || staticPreviewUrl || !webcontainer) return undefined
+  const retryPreviewBridge = useCallback(() => {
+    if (previewUrl) {
+      setPreviewKey((key) => key + 1)
+      setPreviewStatus('Reloading the connected WebContainer preview...')
+      return
+    }
 
-    const timer = window.setTimeout(() => {
-      buildStaticPreviewFallback({ silent: true })
-    }, 2500)
+    const port = bridgePendingPort || pendingPreviewPortRef.current || activePreviewPortRef.current || defaultRunPort
+    const bridgedUrl = previewUrlsByPortRef.current.get(Number(port))
 
-    return () => window.clearTimeout(timer)
-  }, [bridgePendingPort, buildStaticPreviewFallback, previewUrl, staticPreviewUrl, webcontainer])
+    if (bridgedUrl) {
+      connectPreview(port, bridgedUrl, 'WebContainer')
+      return
+    }
+
+    setPreviewStatus(`Still waiting for WebContainer to expose port ${port}. Keep the dev server running, or click Dev to restart it.`)
+    setOperationStatus(`No preview URL has been emitted for port ${port} yet.`)
+    writeTerminal(`\r\n\x1b[1;33mPreview bridge has not emitted a URL for port ${port} yet. If this stays stuck, click Dev to restart the server.\x1b[0m\r\n`)
+  }, [bridgePendingPort, connectPreview, previewUrl, writeTerminal])
 
   const exportProject = useCallback(async () => {
     if (!webcontainer || tree.length === 0) {
@@ -5424,7 +5456,7 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
             <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
-            <button type="button" title="Build static preview fallback" disabled={!webcontainer} onClick={() => buildStaticPreviewFallback()}>Static</button>
+            <button type="button" title="Retry the real WebContainer preview bridge" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair</button>
             <button type="button" title="Open preview in a new tab" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
           </div>
@@ -5452,7 +5484,7 @@ runpy.run_path(target, run_name="__main__")
               {bridgePendingPort ? (
                 <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Restart managed dev server</button>
               ) : null}
-              <button type="button" disabled={!webcontainer} onClick={() => buildStaticPreviewFallback()}>Try static preview</button>
+              <button type="button" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair preview bridge</button>
             </div>
           )}
         </div>
