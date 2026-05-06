@@ -11,6 +11,7 @@ export default defineConfig({
           const pathname = new URL(req.url || '/', 'http://localhost').pathname
           const handlers = {
             '/api/auth': () => import('./api/auth.js'),
+            '/api/cloud-runner': () => import('./api/cloud-runner.js'),
             '/api/projects': () => import('./api/projects.js'),
             '/api/settings': () => import('./api/settings.js'),
           }

@@ -1130,7 +1130,11 @@ async function apiRequest(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined,
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`)
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status})`)
+    error.details = data.details || ''
+    throw error
+  }
   return data
 }
 
@@ -1814,6 +1818,37 @@ async function readExplorerTree(webcontainer, dir = '') {
   return sortEntries(nodes)
 }
 
+function treeFromFiles(files = []) {
+  const root = []
+  const sortTreeNodes = (nodes) => sortEntries(nodes.map((node) => (
+    node.type === 'directory'
+      ? { ...node, children: sortTreeNodes(node.children || []) }
+      : node
+  )))
+
+  files.forEach((file) => {
+    const parts = normalizePath(file.path).split('/').filter(Boolean)
+    let siblings = root
+
+    parts.forEach((part, index) => {
+      const path = parts.slice(0, index + 1).join('/')
+      const isFile = index === parts.length - 1
+      let node = siblings.find((item) => item.name === part)
+
+      if (!node) {
+        node = isFile
+          ? { name: part, path, type: 'file' }
+          : { name: part, path, type: 'directory', children: [] }
+        siblings.push(node)
+      }
+
+      if (!isFile) siblings = node.children
+    })
+  })
+
+  return sortTreeNodes(root)
+}
+
 function FileTree({ nodes, activePath, changedPaths = [], onOpenFile, onSelectPath, selectedPath, depth = 0 }) {
   return (
     <div className="file-tree">
@@ -2308,6 +2343,14 @@ export default function App() {
   const [devStatus, setDevStatus] = useState('Stopped')
   const [previewStatus, setPreviewStatus] = useState('Waiting for a dev server.')
   const [bridgePendingPort, setBridgePendingPort] = useState(0)
+  const [cloudRunner, setCloudRunner] = useState({
+    status: 'idle',
+    sandboxId: '',
+    commandId: '',
+    previewUrl: '',
+    logs: '',
+    error: '',
+  })
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [operationStatus, setOperationStatus] = useState('')
@@ -2527,7 +2570,11 @@ export default function App() {
   ])
 
   const handleSignOut = useCallback(async () => {
+    const activeSandboxId = cloudRunner.sandboxId
     try {
+      if (activeSandboxId) {
+        await apiRequest('/api/cloud-runner', { method: 'POST', body: { action: 'stop', sandboxId: activeSandboxId } })
+      }
       await apiRequest('/api/auth', { method: 'POST', body: { action: 'signout' } })
     } catch {
       // Local session cleanup still happens below.
@@ -2541,6 +2588,7 @@ export default function App() {
     setProjectName('No folder opened')
     setTree([])
     setTabs([])
+    setCloudRunner({ status: 'idle', sandboxId: '', commandId: '', previewUrl: '', logs: '', error: '' })
     setActivePath('')
     setSelectedPath('')
     setProjectHubStatus('')
@@ -2548,7 +2596,7 @@ export default function App() {
     setAuthError('')
     setAuthMode('signin')
     setAuthForm({ name: '', email: '', password: '' })
-  }, [])
+  }, [cloudRunner.sandboxId])
 
   const refreshExplorer = useCallback(async (container = webcontainer) => {
     if (!container) return
@@ -2645,7 +2693,37 @@ export default function App() {
 
   const openFile = useCallback(
     async (path, container = webcontainer) => {
-      if (!container) return
+      if (!container) {
+        const cloudFile = activeCloudProjectRef.current?.files?.find((file) => normalizePath(file.path) === normalizePath(path))
+        if (!cloudFile) return
+        const rawContents = cloudFile.data instanceof Uint8Array
+          ? new TextDecoder().decode(cloudFile.data)
+          : String(cloudFile.data || '')
+        setTabs((currentTabs) => {
+          const existing = currentTabs.find((tab) => tab.path === path)
+          if (existing) {
+            return currentTabs.map((tab) =>
+              tab.path === path ? { ...tab, contents: rawContents, savedContents: rawContents, dirty: false } : tab,
+            )
+          }
+
+          return [
+            ...currentTabs,
+            {
+              path,
+              name: baseName(path),
+              contents: rawContents,
+              savedContents: rawContents,
+              dirty: false,
+              language: getLanguage(path),
+            },
+          ]
+        })
+        setActivePath(path)
+        setSelectedPath(path)
+        setOperationStatus(`Opened ${path} from saved cloud files.`)
+        return
+      }
       try {
         const contents = await container.fs.readFile(path, 'utf-8')
         setTabs((currentTabs) => {
@@ -2763,10 +2841,56 @@ export default function App() {
   }, [writeTerminal])
 
   const saveAllDirtyTabs = useCallback(async (options = {}) => {
-    if (!webcontainer) return 0
-
     const dirtyTabs = tabs.filter((tab) => tab.dirty)
     if (!dirtyTabs.length) return 0
+
+    if (!webcontainer) {
+      if (!activeCloudProject?.id) return 0
+
+      const dirtyPaths = new Set(dirtyTabs.map((tab) => normalizePath(tab.path)))
+      const nextFiles = [
+        ...(activeCloudProject.files || []).filter((file) => !dirtyPaths.has(normalizePath(file.path))),
+        ...dirtyTabs.map((tab) => ({ path: tab.path, data: tab.contents })),
+      ]
+
+      const data = await apiRequest('/api/projects', {
+        method: 'POST',
+        body: {
+          action: 'save',
+          id: activeCloudProject.id,
+          name: projectNameRef.current || activeCloudProject.name,
+          files: filesForApi(nextFiles),
+        },
+      })
+      const project = projectFromApi(data.project)
+      activeCloudProjectRef.current = project
+      setActiveCloudProject(project)
+      setCloudProjects((projects) => {
+        const summary = {
+          id: project.id,
+          name: project.name,
+          fileCount: project.files?.length || 0,
+          updatedAt: project.updatedAt,
+          lastOpenedAt: project.lastOpenedAt,
+        }
+        return [summary, ...projects.filter((item) => item.id !== project.id)]
+      })
+      setTree(treeFromFiles(project.files || []))
+      setTabs((currentTabs) =>
+        currentTabs.map((tab) =>
+          dirtyPaths.has(normalizePath(tab.path))
+            ? { ...tab, savedContents: tab.contents, dirty: false }
+            : tab,
+        ),
+      )
+      setPreviewKey((key) => key + 1)
+
+      if (!options.silent) {
+        setOperationStatus(`Saved ${dirtyTabs.length} open file${dirtyTabs.length === 1 ? '' : 's'} to Cloud Runner.`)
+      }
+
+      return dirtyTabs.length
+    }
 
     await Promise.all(dirtyTabs.map(async (tab) => {
       const dir = parentPath(tab.path)
@@ -2793,10 +2917,60 @@ export default function App() {
     }
 
     return dirtyTabs.length
-  }, [detectProjectDetails, refreshExplorer, saveCurrentSnapshot, tabs, webcontainer])
+  }, [activeCloudProject, detectProjectDetails, refreshExplorer, saveCurrentSnapshot, tabs, webcontainer])
+
+  const saveImportedFilesToCloudProject = useCallback(async (files, name = 'Imported Project') => {
+    if (!activeCloudProject?.id) return
+
+    setIsImporting(true)
+    setOperationStatus(`Saving ${files.length} files for Cloud Runner...`)
+
+    try {
+      const data = await apiRequest('/api/projects', {
+        method: 'POST',
+        body: {
+          action: 'save',
+          id: activeCloudProject.id,
+          name,
+          files: filesForApi(files),
+        },
+      })
+      const project = projectFromApi(data.project)
+      activeCloudProjectRef.current = project
+      setActiveCloudProject(project)
+      setCloudProjects((projects) => {
+        const summary = {
+          id: project.id,
+          name: project.name,
+          fileCount: project.files?.length || 0,
+          updatedAt: project.updatedAt,
+          lastOpenedAt: project.lastOpenedAt,
+        }
+        return [summary, ...projects.filter((item) => item.id !== project.id)]
+      })
+      setProjectName(project.name)
+      setTree(treeFromFiles(project.files || []))
+      setTabs([])
+      setActivePath('')
+      setSelectedPath('')
+      setOperationStatus(`Saved ${name} for Cloud Runner. Click Cloud in the preview panel to run it.`)
+    } catch (error) {
+      setOperationStatus(`Cloud save failed: ${error.message}`)
+      addProblem('Cloud Save', error.message)
+    } finally {
+      setIsImporting(false)
+    }
+  }, [activeCloudProject, addProblem])
 
   const returnToProjectHub = useCallback(async () => {
     stopDevServer()
+    if (cloudRunner.sandboxId) {
+      apiRequest('/api/cloud-runner', {
+        method: 'POST',
+        body: { action: 'stop', sandboxId: cloudRunner.sandboxId },
+      }).catch(() => {})
+      setCloudRunner((runner) => ({ ...runner, status: 'stopped', sandboxId: '', commandId: '', previewUrl: '' }))
+    }
     if (webcontainer && activeCloudProject?.id) {
       try {
         setProjectHubStatus('Saving project before switching...')
@@ -2820,10 +2994,60 @@ export default function App() {
     loadedCloudProjectIdRef.current = ''
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
-  }, [activeCloudProject, loadCloudProjects, saveAllDirtyTabs, stopDevServer, webcontainer])
+  }, [activeCloudProject, cloudRunner.sandboxId, loadCloudProjects, saveAllDirtyTabs, stopDevServer, webcontainer])
 
   const saveActiveFile = useCallback(async () => {
-    if (!webcontainer || !activeTab) return
+    if (!activeTab) return
+
+    if (!webcontainer) {
+      if (!activeCloudProject?.id) return
+
+      const activePath = normalizePath(activeTab.path)
+      const nextFiles = [
+        ...(activeCloudProject.files || []).filter((file) => normalizePath(file.path) !== activePath),
+        { path: activeTab.path, data: activeTab.contents },
+      ]
+
+      try {
+        const data = await apiRequest('/api/projects', {
+          method: 'POST',
+          body: {
+            action: 'save',
+            id: activeCloudProject.id,
+            name: projectNameRef.current || activeCloudProject.name,
+            files: filesForApi(nextFiles),
+          },
+        })
+        const project = projectFromApi(data.project)
+        activeCloudProjectRef.current = project
+        setActiveCloudProject(project)
+        setCloudProjects((projects) => {
+          const summary = {
+            id: project.id,
+            name: project.name,
+            fileCount: project.files?.length || 0,
+            updatedAt: project.updatedAt,
+            lastOpenedAt: project.lastOpenedAt,
+          }
+          return [summary, ...projects.filter((item) => item.id !== project.id)]
+        })
+        setTree(treeFromFiles(project.files || []))
+        setTabs((currentTabs) =>
+          currentTabs.map((tab) =>
+            tab.path === activeTab.path
+              ? { ...tab, savedContents: activeTab.contents, dirty: false }
+              : tab,
+          ),
+        )
+        setOperationStatus(`Saved ${activeTab.path} to Cloud Runner`)
+        setPreviewKey((key) => key + 1)
+      } catch (error) {
+        setOperationStatus(`Cloud save failed: ${error.message}`)
+        addProblem('Cloud Save', error.message)
+      }
+      return
+    }
+
     const dir = parentPath(activeTab.path)
     if (dir) await webcontainer.fs.mkdir(dir, { recursive: true })
     await webcontainer.fs.writeFile(activeTab.path, activeTab.contents)
@@ -2839,7 +3063,7 @@ export default function App() {
     if (activeTab.path === 'package.json') await detectProjectDetails(webcontainer)
     await saveCurrentSnapshot(webcontainer)
     setPreviewKey((key) => key + 1)
-  }, [activeTab, detectProjectDetails, refreshExplorer, saveCurrentSnapshot, webcontainer])
+  }, [activeCloudProject, activeTab, addProblem, detectProjectDetails, refreshExplorer, saveCurrentSnapshot, webcontainer])
 
   useEffect(() => {
     saveActiveRef.current = saveActiveFile
@@ -3432,10 +3656,104 @@ runpy.run_path(target, run_name="__main__")
     setOperationStatus('Unknown webterm command.')
   }, [openFile, refreshExplorer, saveCurrentSnapshot, webcontainer, writeTerminal])
 
+  const stopCloudRunner = useCallback(async (options = {}) => {
+    const sandboxId = options.sandboxId || cloudRunner.sandboxId
+    if (!sandboxId) return
+
+    setCloudRunner((runner) => ({ ...runner, status: 'stopping' }))
+    try {
+      await apiRequest('/api/cloud-runner', {
+        method: 'POST',
+        body: { action: 'stop', sandboxId },
+      })
+      setCloudRunner({
+        status: 'stopped',
+        sandboxId: '',
+        commandId: '',
+        previewUrl: '',
+        logs: `${cloudRunner.logs || ''}\nCloud sandbox stopped.`,
+        error: '',
+      })
+      if (previewUrl === cloudRunner.previewUrl) {
+        setPreviewUrl('')
+        setPreviewStatus('Cloud Runner stopped.')
+      }
+      setDevStatus('Stopped')
+    } catch (error) {
+      setCloudRunner((runner) => ({ ...runner, status: 'error', error: error.message }))
+      addProblem('Cloud Runner', error.message)
+    }
+  }, [addProblem, cloudRunner, previewUrl])
+
+  const startCloudRunner = useCallback(async (command = '') => {
+    if (!activeCloudProject?.id) {
+      setOperationStatus('Create or open a project before starting Cloud Runner.')
+      return
+    }
+
+    let files = activeCloudProject.files || []
+    setActiveActivity('preview')
+    setBottomPanelTab('terminal')
+    setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...' }))
+    setDevStatus('Cloud starting')
+    setPreviewStatus('Uploading files to a hosted sandbox...')
+    writeTerminal('\r\n\x1b[1;36mStarting Cloud Runner on Vercel Sandbox...\x1b[0m\r\n')
+
+    try {
+      if (webcontainer) {
+        await saveAllDirtyTabs({ silent: true })
+        files = await readWorkspaceFiles(webcontainer)
+      }
+
+      if (!files.length) {
+        throw new Error('Cloud Runner needs project files. Upload a folder or load the demo first.')
+      }
+
+      const body = {
+        action: 'start',
+        projectId: activeCloudProject.id,
+        command,
+        files: filesForApi(files),
+        port: defaultRunPort,
+        install: true,
+      }
+      const result = await apiRequest('/api/cloud-runner', { method: 'POST', body })
+      const logs = result.logs || 'Cloud Runner started.'
+      writeTerminal(`${logs.replace(/\n/g, '\r\n')}\r\n`)
+      setCloudRunner({
+        status: 'running',
+        sandboxId: result.sandboxId || '',
+        commandId: result.commandId || '',
+        previewUrl: result.previewUrl || '',
+        logs,
+        error: '',
+      })
+      if (result.previewUrl) {
+        setPreviewUrl(result.previewUrl)
+        clearStaticPreview()
+        setPreviewKey((key) => key + 1)
+      }
+      setDevStatus('Cloud running')
+      setPreviewStatus('Cloud Runner is hosting the preview. This works even when WebContainer is blocked.')
+      setOperationStatus('Cloud Runner started on Vercel Sandbox.')
+    } catch (error) {
+      const details = error.details ? `\n${error.details}` : ''
+      writeTerminal(`\r\n\x1b[1;31mCloud Runner failed:\x1b[0m ${error.message}${details}\r\n`)
+      setCloudRunner((runner) => ({ ...runner, status: 'error', error: error.message }))
+      setDevStatus('Cloud error')
+      setPreviewStatus(`Cloud Runner failed: ${error.message}`)
+      addProblem('Cloud Runner', error.message)
+    }
+  }, [activeCloudProject, addProblem, clearStaticPreview, saveAllDirtyTabs, webcontainer, writeTerminal])
+
   const runTerminalCommand = useCallback((command) => {
     const pythonRequest = getPythonCommandRequest(command)
     if (pythonRequest) {
-      runPythonRequest(pythonRequest, command)
+      if (webcontainer || pythonRequest.type === 'version' || pythonRequest.type === 'inline') {
+        runPythonRequest(pythonRequest, command)
+      } else {
+        startCloudRunner(command)
+      }
       return
     }
 
@@ -3447,18 +3765,22 @@ runpy.run_path(target, run_name="__main__")
 
     const managedNpmScript = getManagedNpmScript(command)
     if (managedNpmScript) {
-      startDevServer(undefined, managedNpmScript)
+      if (webcontainer) {
+        startDevServer(undefined, managedNpmScript)
+      } else {
+        startCloudRunner(command)
+      }
       return
     }
 
     if (!terminalApiRef.current) {
-      setOperationStatus('Terminal is still connecting. Try again in a moment.')
+      startCloudRunner(command)
       return
     }
 
     terminalApiRef.current.run(command)
     setOperationStatus(`Running: ${command}`)
-  }, [handleWebTerminalCommand, runPythonRequest, startDevServer])
+  }, [handleWebTerminalCommand, runPythonRequest, startCloudRunner, startDevServer, webcontainer])
 
   const interceptTerminalCommand = useCallback((command) => {
     if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command) || getManagedNpmScript(command)) {
@@ -3468,6 +3790,28 @@ runpy.run_path(target, run_name="__main__")
 
     return false
   }, [runTerminalCommand])
+
+  useEffect(() => {
+    if (!cloudRunner.sandboxId) return undefined
+
+    const stopCloudOnLeave = () => {
+      fetch('/api/cloud-runner', {
+        method: 'POST',
+        credentials: 'include',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', sandboxId: cloudRunner.sandboxId }),
+      }).catch(() => {})
+    }
+
+    window.addEventListener('pagehide', stopCloudOnLeave)
+    window.addEventListener('beforeunload', stopCloudOnLeave)
+
+    return () => {
+      window.removeEventListener('pagehide', stopCloudOnLeave)
+      window.removeEventListener('beforeunload', stopCloudOnLeave)
+    }
+  }, [cloudRunner.sandboxId])
 
   const restartTerminal = useCallback(() => {
     terminalApiRef.current?.kill()
@@ -3496,7 +3840,7 @@ runpy.run_path(target, run_name="__main__")
   }, [])
 
   const openPreviewInNewTab = useCallback(() => {
-    const url = previewUrl || staticPreviewUrl
+    const url = previewUrl || cloudRunner.previewUrl || staticPreviewUrl
     if (!url) {
       setPreviewStatus('No preview URL is available yet. Run Dev first and wait for the bridge URL.')
       return
@@ -3504,7 +3848,7 @@ runpy.run_path(target, run_name="__main__")
 
     window.open(url, '_blank', 'noopener,noreferrer')
     setPreviewStatus('Opened the preview in a new tab. This helps when a managed Chromebook blocks embedded iframes.')
-  }, [previewUrl, staticPreviewUrl])
+  }, [cloudRunner.previewUrl, previewUrl, staticPreviewUrl])
 
   const buildStaticPreviewFallback = useCallback(async (options = {}) => {
     if (!webcontainer) {
@@ -4382,7 +4726,12 @@ runpy.run_path(target, run_name="__main__")
 
   const importProjectFiles = useCallback(
     async (files, name = 'Imported Project', options = {}) => {
-      if (!webcontainer || (files.length === 0 && !options.allowEmpty)) return
+      if (!webcontainer) {
+        if (files.length === 0 && !options.allowEmpty) return
+        await saveImportedFilesToCloudProject(files, name)
+        return
+      }
+      if (files.length === 0 && !options.allowEmpty) return
 
       setIsImporting(true)
       setOperationStatus(`Importing ${files.length} files...`)
@@ -4422,7 +4771,7 @@ runpy.run_path(target, run_name="__main__")
         setIsImporting(false)
       }
     },
-    [clearStaticPreview, detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, stopDevServer, webcontainer, writeTerminal],
+    [clearStaticPreview, detectProjectDetails, openFile, refreshExplorer, saveCurrentSnapshot, saveImportedFilesToCloudProject, stopDevServer, webcontainer, writeTerminal],
   )
 
   const restoreSavedProject = useCallback(async () => {
@@ -4456,6 +4805,7 @@ runpy.run_path(target, run_name="__main__")
       setIsSettingsOpen(false)
       loadedCloudProjectIdRef.current = ''
       setActiveCloudProject(project)
+      setTree(treeFromFiles(project.files || []))
       setCloudProjects((projects) => [
         {
           id: project.id,
@@ -4482,6 +4832,7 @@ runpy.run_path(target, run_name="__main__")
       const project = projectFromApi(data.project)
       loadedCloudProjectIdRef.current = ''
       setActiveCloudProject(project)
+      setTree(treeFromFiles(project.files || []))
       setProjectName(project.name)
       setProjectHubStatus('Project opened. Starting workspace...')
     } catch (error) {
@@ -4503,7 +4854,7 @@ runpy.run_path(target, run_name="__main__")
   }, [activeCloudProject, importProjectFiles, webcontainer])
 
   const openLocalFolder = useCallback(async () => {
-    if (!webcontainer) return
+    if (isImporting) return
 
     if ('showDirectoryPicker' in window) {
       try {
@@ -4520,22 +4871,24 @@ runpy.run_path(target, run_name="__main__")
     }
 
     folderInputRef.current?.click()
-  }, [importProjectFiles, webcontainer])
+  }, [importProjectFiles, isImporting])
 
   const openLocalFiles = useCallback(() => {
-    if (!webcontainer || isImporting) return
+    if (isImporting) return
     fileInputRef.current?.click()
-  }, [isImporting, webcontainer])
+  }, [isImporting])
 
   const loadDemoGame = useCallback(async () => {
-    if (!webcontainer || isImporting) return
-    if (tree.length > 0 && !window.confirm('Load the demo game and replace the current WebContainer workspace?')) {
+    if (isImporting) return
+    if (tree.length > 0 && !window.confirm('Load the demo game and replace the current workspace?')) {
       return
     }
 
     await importProjectFiles(demoGameFiles, 'Neon Runner Demo')
     await openFile('src/main.js', webcontainer)
-    setOperationStatus('Demo game loaded. Run npm install, then npm run dev.')
+    setOperationStatus(webcontainer
+      ? 'Demo game loaded. Run npm install, then npm run dev.'
+      : 'Demo game saved for Cloud Runner. Click Cloud in the preview panel to run it.')
   }, [importProjectFiles, isImporting, openFile, tree.length, webcontainer])
 
   const handleFolderInput = useCallback(
@@ -4928,7 +5281,7 @@ runpy.run_path(target, run_name="__main__")
     </section>
   )
 
-  const displayPreviewUrl = previewUrl || staticPreviewUrl
+  const displayPreviewUrl = previewUrl || cloudRunner.previewUrl || staticPreviewUrl
   const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
 
   if (authLoading) {
@@ -5030,8 +5383,9 @@ runpy.run_path(target, run_name="__main__")
           <button type="button" disabled={!webcontainer || isImporting} onClick={loadDemoGame}>Demo Game</button>
           <button type="button" disabled={!activeTab} onClick={runActiveFile}>Run File</button>
           <button type="button" onClick={() => runTerminalCommand('npm install')}>Install</button>
-          <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Run Dev</button>
-          <button type="button" onClick={() => startDevServer(undefined, 'start')}>Run Start</button>
+          <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Run Dev</button>
+          <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Run Start</button>
+          <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
           <div className="view-switcher" role="group" aria-label="Visible sections">
             <button
               className={layoutMode === 'agentCode' && !isSettingsOpen ? 'is-active' : ''}
@@ -5177,6 +5531,9 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" onClick={() => window.location.reload()}>
               Reload and retry
             </button>
+            <button type="button" onClick={() => startCloudRunner()}>
+              Run in Cloud
+            </button>
           </div>
         ) : null}
         {aiCoderPanel}
@@ -5251,7 +5608,7 @@ runpy.run_path(target, run_name="__main__")
               <span>Next: run npm scripts for web apps, or open a Python file and use Run File.</span>
               <button type="button" onClick={() => runTerminalCommand('npm install')}>npm install</button>
               <button type="button" onClick={runActiveFile} disabled={!activeTab}>Run File</button>
-              <button type="button" onClick={() => startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start')}>
+              <button type="button" onClick={() => webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner()}>
                 Run app
               </button>
               <button type="button" onClick={() => setShowOnboarding(false)}>Dismiss</button>
@@ -5430,15 +5787,29 @@ runpy.run_path(target, run_name="__main__")
             ) : (
               <p className="empty-panel-state">No problems captured yet.</p>
             )}
-            </div>
+          </div>
           <div className={`terminal-tab-pane ${bottomPanelTab === 'terminal' ? 'is-active' : ''}`}>
-            <TerminalPanel
-              key={terminalSessionKey}
-              webcontainer={webcontainer}
-              onReady={handleTerminalReady}
-              onOutput={inspectProcessOutput}
-              onInterceptCommand={interceptTerminalCommand}
-            />
+            {webcontainer ? (
+              <TerminalPanel
+                key={terminalSessionKey}
+                webcontainer={webcontainer}
+                onReady={handleTerminalReady}
+                onOutput={inspectProcessOutput}
+                onInterceptCommand={interceptTerminalCommand}
+              />
+            ) : (
+              <div className="cloud-terminal-fallback">
+                <div>
+                  <strong>Cloud Runner</strong>
+                  <span>{cloudRunner.status === 'idle' ? 'Ready to run this project on hosted compute.' : cloudRunner.status}</span>
+                </div>
+                <pre>{cloudRunner.logs || runtimeIssue?.message || 'The local browser runtime is blocked. Use Cloud Run to execute on Vercel Sandbox and stream the preview back here.'}</pre>
+                <div>
+                  <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
+                  <button type="button" disabled={!cloudRunner.sandboxId} onClick={() => stopCloudRunner()}>Stop Cloud</button>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       </main>
@@ -5462,9 +5833,10 @@ runpy.run_path(target, run_name="__main__")
             <span>{devStatus}</span>
           </div>
           <div className="preview-actions">
-            <button type="button" title="Run npm run dev" onClick={() => startDevServer(undefined, 'dev')}>Dev</button>
-            <button type="button" title="Run npm run start" onClick={() => startDevServer(undefined, 'start')}>Start</button>
-            <button type="button" title="Stop dev server" onClick={stopDevServer}>Stop</button>
+            <button type="button" title="Run npm run dev" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Dev</button>
+            <button type="button" title="Run npm run start" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Start</button>
+            <button type="button" title="Run on Vercel Sandbox for locked Chromebooks" onClick={() => startCloudRunner()}>Cloud</button>
+            <button type="button" title="Stop dev server" onClick={() => { stopDevServer(); stopCloudRunner() }}>Stop</button>
             <button type="button" title="Retry the real WebContainer preview bridge" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair</button>
             <button type="button" title="Open preview in a new tab" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open</button>
             <button type="button" title="Reload preview" onClick={() => setPreviewKey((key) => key + 1)}>Reload</button>
@@ -5491,7 +5863,7 @@ runpy.run_path(target, run_name="__main__")
             <div className="preview-placeholder">
               <span>{previewStatus || 'Waiting for a dev server. Try npm run dev, npm start, or run a Python file in the terminal panel.'}</span>
               {bridgePendingPort ? (
-                <button type="button" onClick={() => startDevServer(undefined, 'dev')}>Restart managed dev server</button>
+                <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Restart managed dev server</button>
               ) : null}
               <button type="button" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair preview bridge</button>
             </div>
