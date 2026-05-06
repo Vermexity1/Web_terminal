@@ -95,14 +95,33 @@ function previewHost(sandbox, port) {
   }
 }
 
-function runnerEnv(sandbox, port) {
+function viteAllowedHost(sandbox, port) {
   const host = previewHost(sandbox, port)
+  if (!host) return '.vercel.run'
+  if (host === 'vercel.run' || host.endsWith('.vercel.run')) return '.vercel.run'
+  return host
+}
+
+function runnerEnv(sandbox, port) {
+  const host = viteAllowedHost(sandbox, port)
   return {
     NODE_ENV: 'development',
     HOST: '0.0.0.0',
     PORT: String(port),
-    ...(host ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: host } : {}),
+    __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: host,
   }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function commandWithRunnerEnv(command, sandbox, port) {
+  const env = runnerEnv(sandbox, port)
+  const exports = Object.entries(env)
+    .map(([key, value]) => `export ${key}=${shellQuote(value)}`)
+    .join('; ')
+  return `${exports}; ${command}`
 }
 
 async function commandOutput(result) {
@@ -164,12 +183,13 @@ async function startRunner(body) {
     }
   }
 
+  logs.push(`Allowed Vite preview host: ${viteAllowedHost(sandbox, port)}`)
   logs.push(`$ ${command}`)
 
   if (!serverCommand) {
     const result = await sandbox.runCommand({
       cmd: 'bash',
-      args: ['-lc', command],
+      args: ['-lc', commandWithRunnerEnv(command, sandbox, port)],
       cwd: appRoot,
       env: runnerEnv(sandbox, port),
     })
@@ -196,7 +216,7 @@ async function startRunner(body) {
 
   const process = await sandbox.runCommand({
     cmd: 'bash',
-    args: ['-lc', command],
+    args: ['-lc', commandWithRunnerEnv(command, sandbox, port)],
     cwd: appRoot,
     detached: true,
     env: runnerEnv(sandbox, port),
