@@ -2347,9 +2347,11 @@ export default function App() {
     status: 'idle',
     sandboxId: '',
     commandId: '',
+    proxyCommandId: '',
     previewUrl: '',
     logs: '',
     error: '',
+    diagnostics: null,
   })
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
@@ -2588,7 +2590,7 @@ export default function App() {
     setProjectName('No folder opened')
     setTree([])
     setTabs([])
-    setCloudRunner({ status: 'idle', sandboxId: '', commandId: '', previewUrl: '', logs: '', error: '' })
+    setCloudRunner({ status: 'idle', sandboxId: '', commandId: '', proxyCommandId: '', previewUrl: '', logs: '', error: '', diagnostics: null })
     setActivePath('')
     setSelectedPath('')
     setProjectHubStatus('')
@@ -2969,7 +2971,7 @@ export default function App() {
         method: 'POST',
         body: { action: 'stop', sandboxId: cloudRunner.sandboxId },
       }).catch(() => {})
-      setCloudRunner((runner) => ({ ...runner, status: 'stopped', sandboxId: '', commandId: '', previewUrl: '' }))
+      setCloudRunner((runner) => ({ ...runner, status: 'stopped', sandboxId: '', commandId: '', proxyCommandId: '', previewUrl: '' }))
     }
     if (webcontainer && activeCloudProject?.id) {
       try {
@@ -3670,9 +3672,11 @@ runpy.run_path(target, run_name="__main__")
         status: 'stopped',
         sandboxId: '',
         commandId: '',
+        proxyCommandId: '',
         previewUrl: '',
         logs: `${cloudRunner.logs || ''}\nCloud sandbox stopped.`,
         error: '',
+        diagnostics: cloudRunner.diagnostics || null,
       })
       if (previewUrl === cloudRunner.previewUrl) {
         setPreviewUrl('')
@@ -3685,6 +3689,31 @@ runpy.run_path(target, run_name="__main__")
     }
   }, [addProblem, cloudRunner, previewUrl])
 
+  const refreshCloudRunnerStatus = useCallback(async () => {
+    if (!cloudRunner.sandboxId) {
+      setOperationStatus('No Cloud Runner sandbox is active.')
+      return
+    }
+
+    try {
+      const params = new URLSearchParams({
+        sandboxId: cloudRunner.sandboxId,
+        ...(cloudRunner.commandId ? { commandId: cloudRunner.commandId } : {}),
+      })
+      const result = await apiRequest(`/api/cloud-runner?${params.toString()}`)
+      setCloudRunner((runner) => ({
+        ...runner,
+        status: result.status || runner.status,
+        logs: result.logs ? `${runner.logs || ''}\n\nLatest output:\n${result.logs}` : runner.logs,
+      }))
+      setOperationStatus('Cloud Runner status refreshed.')
+    } catch (error) {
+      setCloudRunner((runner) => ({ ...runner, status: 'error', error: error.message }))
+      setOperationStatus(`Cloud status failed: ${error.message}`)
+      addProblem('Cloud Runner', error.message)
+    }
+  }, [addProblem, cloudRunner.commandId, cloudRunner.sandboxId])
+
   const startCloudRunner = useCallback(async (command = '') => {
     if (!activeCloudProject?.id) {
       setOperationStatus('Create or open a project before starting Cloud Runner.')
@@ -3694,7 +3723,7 @@ runpy.run_path(target, run_name="__main__")
     let files = activeCloudProject.files || []
     setActiveActivity('preview')
     setBottomPanelTab('terminal')
-    setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...' }))
+    setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...', diagnostics: null }))
     setDevStatus('Cloud starting')
     setPreviewStatus('Uploading files to a hosted sandbox...')
     writeTerminal('\r\n\x1b[1;36mStarting Cloud Runner on Vercel Sandbox...\x1b[0m\r\n')
@@ -3721,21 +3750,25 @@ runpy.run_path(target, run_name="__main__")
       const logs = result.logs || 'Cloud Runner started.'
       writeTerminal(`${logs.replace(/\n/g, '\r\n')}\r\n`)
       setCloudRunner({
-        status: 'running',
+        status: result.status || 'running',
         sandboxId: result.sandboxId || '',
         commandId: result.commandId || '',
+        proxyCommandId: result.proxyCommandId || '',
         previewUrl: result.previewUrl || '',
         logs,
         error: '',
+        diagnostics: result.diagnostics || null,
       })
       if (result.previewUrl) {
         setPreviewUrl(result.previewUrl)
         clearStaticPreview()
         setPreviewKey((key) => key + 1)
       }
-      setDevStatus('Cloud running')
-      setPreviewStatus('Cloud Runner is hosting the preview. This works even when WebContainer is blocked.')
-      setOperationStatus('Cloud Runner started on Vercel Sandbox.')
+      setDevStatus(result.previewUrl ? 'Cloud running' : 'Cloud finished')
+      setPreviewStatus(result.previewUrl
+        ? 'Cloud Runner is hosting the preview through the browser-safe proxy.'
+        : 'Cloud command finished. Start a dev server to open a preview.')
+      setOperationStatus(result.previewUrl ? 'Cloud Runner started on Vercel Sandbox.' : 'Cloud command finished.')
     } catch (error) {
       const details = error.details ? `\n${error.details}` : ''
       writeTerminal(`\r\n\x1b[1;31mCloud Runner failed:\x1b[0m ${error.message}${details}\r\n`)
@@ -5283,6 +5316,19 @@ runpy.run_path(target, run_name="__main__")
 
   const displayPreviewUrl = previewUrl || cloudRunner.previewUrl || staticPreviewUrl
   const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
+  const cloudDiagnostics = cloudRunner.diagnostics || {}
+  const troubleshootRows = [
+    ['Status', cloudRunner.status || 'idle'],
+    ['Sandbox', cloudRunner.sandboxId || 'not started'],
+    ['Preview mode', cloudDiagnostics.mode || (cloudRunner.previewUrl ? 'preview-proxy' : 'not started')],
+    ['Preview URL', cloudRunner.previewUrl || 'not available'],
+    ['Public preview host', cloudDiagnostics.previewHost || 'not available'],
+    ['Proxy port', cloudDiagnostics.proxyPort || 'not available'],
+    ['App port', cloudDiagnostics.targetPort || 'not available'],
+    ['Command', cloudDiagnostics.command || 'not started'],
+    ['Vite allowed host', cloudDiagnostics.viteAllowedHost || 'not available'],
+    ['Runtime', cloudDiagnostics.runtime || 'not available'],
+  ]
 
   if (authLoading) {
     return (
@@ -5713,6 +5759,13 @@ runpy.run_path(target, run_name="__main__")
               >
                 Problems
               </button>
+              <button
+                className={bottomPanelTab === 'troubleshoot' ? 'is-active' : ''}
+                type="button"
+                onClick={() => selectBottomPanelTab('troubleshoot')}
+              >
+                Troubleshoot
+              </button>
             </div>
             <div className="terminal-actions">
               <span>{isInstalling ? 'Installing packages' : `Interactive jsh + ${languageStatus}`}</span>
@@ -5787,6 +5840,31 @@ runpy.run_path(target, run_name="__main__")
             ) : (
               <p className="empty-panel-state">No problems captured yet.</p>
             )}
+          </div>
+          <div className={`troubleshoot-panel ${bottomPanelTab === 'troubleshoot' ? 'is-active' : ''}`}>
+            <div className="troubleshoot-header">
+              <div>
+                <strong>Cloud Runner Troubleshoot</strong>
+                <span>Preview requests are routed through a proxy so Vite sees localhost instead of the Vercel sandbox host.</span>
+              </div>
+              <div>
+                <button type="button" onClick={refreshCloudRunnerStatus} disabled={!cloudRunner.sandboxId}>Refresh</button>
+                <button type="button" onClick={() => startCloudRunner()} disabled={cloudRunner.status === 'starting'}>Restart Cloud</button>
+                <button type="button" onClick={openPreviewInNewTab} disabled={!displayPreviewUrl}>Open Preview</button>
+              </div>
+            </div>
+            <div className="troubleshoot-grid">
+              {troubleshootRows.map(([label, value]) => (
+                <div key={label}>
+                  <span>{label}</span>
+                  <code>{String(value || 'not available')}</code>
+                </div>
+              ))}
+            </div>
+            <div className="troubleshoot-log">
+              <strong>Runner Logs</strong>
+              <pre>{cloudRunner.logs || runtimeIssue?.message || 'No Cloud Runner logs yet. Start Cloud Run to collect diagnostics.'}</pre>
+            </div>
           </div>
           <div className={`terminal-tab-pane ${bottomPanelTab === 'terminal' ? 'is-active' : ''}`}>
             {webcontainer ? (

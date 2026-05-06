@@ -1789,6 +1789,11 @@ button:disabled {
   gap: 4px;
 }
 
+.bottom-tabs {
+  min-width: 0;
+  overflow-x: auto;
+}
+
 .bottom-tabs button,
 .right-panel-tabs button {
   height: 26px;
@@ -1799,6 +1804,7 @@ button:disabled {
   cursor: pointer;
   font-size: 0.72rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .bottom-tabs button.is-active,
@@ -2087,6 +2093,133 @@ button:disabled {
   margin: 12px;
   color: #7f8fa3;
   font-size: 0.82rem;
+}
+
+.troubleshoot-panel {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(87, 107, 132, 0.22);
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.12), transparent 44%),
+    #060914;
+}
+
+.troubleshoot-panel.is-active {
+  display: grid;
+}
+
+.troubleshoot-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.troubleshoot-header strong,
+.troubleshoot-header span {
+  display: block;
+}
+
+.troubleshoot-header strong {
+  color: #edf2ff;
+  font-size: 0.82rem;
+}
+
+.troubleshoot-header span {
+  margin-top: 2px;
+  color: #8fa0b3;
+  font-size: 0.7rem;
+}
+
+.troubleshoot-header > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.troubleshoot-header button {
+  height: 28px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 6px;
+  color: #dce8f8;
+  background: rgba(37, 99, 235, 0.16);
+  cursor: pointer;
+}
+
+.troubleshoot-header button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.troubleshoot-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  overflow: auto;
+}
+
+.troubleshoot-grid div {
+  min-width: 0;
+  border: 1px solid rgba(96, 165, 250, 0.16);
+  border-radius: 7px;
+  padding: 8px;
+  background: rgba(2, 6, 23, 0.58);
+}
+
+.troubleshoot-grid span,
+.troubleshoot-grid code {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.troubleshoot-grid span {
+  color: #7f8fa3;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+}
+
+.troubleshoot-grid code {
+  margin-top: 5px;
+  color: #dbeafe;
+  font-family: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  font-size: 0.72rem;
+}
+
+.troubleshoot-log {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+}
+
+.troubleshoot-log strong {
+  color: #edf2ff;
+  font-size: 0.76rem;
+}
+
+.troubleshoot-log pre {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 7px;
+  padding: 10px;
+  color: #dbeafe;
+  background: rgba(2, 6, 23, 0.72);
+  font: 0.72rem/1.45 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .terminal-tab-pane {
