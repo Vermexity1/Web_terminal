@@ -1473,6 +1473,15 @@ function stripAnsi(value) {
   return String(value).replace(/\u001b\[[0-9;]*m/g, '')
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 function getPreviewSignalFromOutput(data) {
   const text = stripAnsi(data)
   const directUrl = text.match(/https?:\/\/[^\s"'<>]+webcontainer-api\.io[^\s"'<>]*/i)?.[0]
@@ -3714,7 +3723,7 @@ runpy.run_path(target, run_name="__main__")
     }
   }, [addProblem, cloudRunner.commandId, cloudRunner.sandboxId])
 
-  const startCloudRunner = useCallback(async (command = '') => {
+  const startCloudRunner = useCallback(async (command = '', options = {}) => {
     if (!activeCloudProject?.id) {
       setOperationStatus('Create or open a project before starting Cloud Runner.')
       return
@@ -3723,6 +3732,51 @@ runpy.run_path(target, run_name="__main__")
     let files = activeCloudProject.files || []
     const previousSandboxId = cloudRunner.sandboxId
     const useStoredFiles = !webcontainer
+    let previewWindow = null
+
+    if (options.openInNewTab) {
+      previewWindow = window.open('', '_blank')
+      if (previewWindow) {
+        previewWindow.document.write(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Starting Cloud Preview</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #030712;
+        color: #dbeafe;
+        font-family: Inter, system-ui, sans-serif;
+      }
+      main {
+        width: min(560px, calc(100vw - 32px));
+        border: 1px solid #1d4ed8;
+        border-radius: 12px;
+        background: #07111f;
+        padding: 28px;
+      }
+      strong { display: block; color: white; margin-bottom: 8px; }
+      span { color: #93c5fd; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <strong>Starting Cloud Preview</strong>
+      <span>Runable is installing, repairing if needed, and opening your project here.</span>
+    </main>
+  </body>
+</html>`)
+        previewWindow.document.close()
+      } else {
+        setPreviewStatus('Your browser blocked the preview tab. Click Open after Cloud Run finishes.')
+      }
+    }
+
     setActiveActivity('preview')
     setBottomPanelTab('terminal')
     setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...', diagnostics: null }))
@@ -3774,6 +3828,14 @@ runpy.run_path(target, run_name="__main__")
         setPreviewUrl(result.previewUrl)
         clearStaticPreview()
         setPreviewKey((key) => key + 1)
+        if (previewWindow && !previewWindow.closed) {
+          try {
+            previewWindow.location.replace(result.previewUrl)
+            previewWindow.opener = null
+          } catch {
+            window.open(result.previewUrl, '_blank', 'noopener,noreferrer')
+          }
+        }
       }
       setDevStatus(result.previewUrl ? 'Cloud running' : 'Cloud finished')
       setPreviewStatus(result.previewUrl
@@ -3783,6 +3845,9 @@ runpy.run_path(target, run_name="__main__")
     } catch (error) {
       const details = error.details ? `\n${error.details}` : ''
       writeTerminal(`\r\n\x1b[1;31mCloud Runner failed:\x1b[0m ${error.message}${details}\r\n`)
+      if (previewWindow && !previewWindow.closed) {
+        previewWindow.document.body.innerHTML = `<main style="max-width: 720px; margin: 15vh auto; font-family: system-ui; color: #e5efff; background: #07111f; border: 1px solid #1d4ed8; border-radius: 12px; padding: 28px;"><strong>Cloud Runner failed</strong><pre style="white-space: pre-wrap; color: #93c5fd;">${escapeHtml(`${error.message}${details}`).slice(0, 4000)}</pre></main>`
+      }
       setCloudRunner((runner) => ({ ...runner, status: 'error', error: error.message }))
       setDevStatus('Cloud error')
       setPreviewStatus(`Cloud Runner failed: ${error.message}`)
@@ -5446,7 +5511,7 @@ runpy.run_path(target, run_name="__main__")
           <button type="button" onClick={() => runTerminalCommand('npm install')}>Install</button>
           <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Run Dev</button>
           <button type="button" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Run Start</button>
-          <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
+          <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud Run</button>
           <div className="view-switcher" role="group" aria-label="Visible sections">
             <button
               className={layoutMode === 'agentCode' && !isSettingsOpen ? 'is-active' : ''}
@@ -5592,7 +5657,7 @@ runpy.run_path(target, run_name="__main__")
             <button type="button" onClick={() => window.location.reload()}>
               Reload and retry
             </button>
-            <button type="button" onClick={() => startCloudRunner()}>
+            <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>
               Run in Cloud
             </button>
           </div>
@@ -5669,7 +5734,7 @@ runpy.run_path(target, run_name="__main__")
               <span>Next: run npm scripts for web apps, or open a Python file and use Run File.</span>
               <button type="button" onClick={() => runTerminalCommand('npm install')}>npm install</button>
               <button type="button" onClick={runActiveFile} disabled={!activeTab}>Run File</button>
-              <button type="button" onClick={() => webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner()}>
+              <button type="button" onClick={() => webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner('', { openInNewTab: true })}>
                 Run app
               </button>
               <button type="button" onClick={() => setShowOnboarding(false)}>Dismiss</button>
@@ -5907,7 +5972,7 @@ runpy.run_path(target, run_name="__main__")
                 </div>
                 <pre>{cloudRunner.logs || runtimeIssue?.message || 'The local browser runtime is blocked. Use Cloud Run to execute on Vercel Sandbox and stream the preview back here.'}</pre>
                 <div>
-                  <button type="button" onClick={() => startCloudRunner()}>Cloud Run</button>
+                  <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud Run</button>
                   <button type="button" disabled={!cloudRunner.sandboxId} onClick={() => stopCloudRunner()}>Stop Cloud</button>
                 </div>
               </div>
@@ -5937,7 +6002,7 @@ runpy.run_path(target, run_name="__main__")
           <div className="preview-actions">
             <button type="button" title="Run npm run dev" onClick={() => webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev')}>Dev</button>
             <button type="button" title="Run npm run start" onClick={() => webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start')}>Start</button>
-            <button type="button" title="Run on Vercel Sandbox for locked Chromebooks" onClick={() => startCloudRunner()}>Cloud</button>
+            <button type="button" title="Run on Vercel Sandbox for locked Chromebooks" onClick={() => startCloudRunner('', { openInNewTab: true })}>Cloud</button>
             <button type="button" title="Stop dev server" onClick={() => { stopDevServer(); stopCloudRunner() }}>Stop</button>
             <button type="button" title="Retry the real WebContainer preview bridge" disabled={!webcontainer} onClick={retryPreviewBridge}>Repair</button>
             <button type="button" title="Open preview in a new tab" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open</button>

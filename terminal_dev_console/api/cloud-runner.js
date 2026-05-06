@@ -492,6 +492,45 @@ export default function App() {
 `
 }
 
+function isRecoveryReactSource(source) {
+  return String(source || '').includes('Preview recovered')
+    && String(source || '').includes('Runable backed it up')
+}
+
+function originalPathForBackup(backupPath) {
+  return String(backupPath || '').replace(/\.broken\.(jsx|tsx)$/i, '.$1')
+}
+
+function restoreRecoveredReactEntries(files) {
+  const repairs = []
+  const nextFiles = [...files]
+
+  for (const backupFile of files) {
+    if (!/\.broken\.(jsx|tsx)$/i.test(backupFile.path || '')) continue
+
+    const originalPath = originalPathForBackup(backupFile.path)
+    const originalIndex = nextFiles.findIndex((file) => (
+      String(file.path || '').toLowerCase() === originalPath.toLowerCase()
+    ))
+    if (originalIndex === -1) continue
+
+    const originalSource = fileContent(nextFiles[originalIndex]).toString('utf8')
+    if (!isRecoveryReactSource(originalSource)) continue
+
+    nextFiles[originalIndex] = {
+      ...nextFiles[originalIndex],
+      data: fileContent(backupFile).toString('utf8'),
+      encoding: 'utf8',
+    }
+    repairs.push({
+      path: originalPath,
+      message: `Restored ${backupFile.path} before compiling the real project.`,
+    })
+  }
+
+  return { files: nextFiles, repairs }
+}
+
 export function recoverBrokenReactEntry(files, output) {
   const errorLocation = parseBabelUnexpectedToken(output)
   const repairs = []
@@ -522,6 +561,7 @@ export function recoverBrokenReactEntry(files, output) {
     path: file.path,
     line: errorLocation.line,
     message: `Recovered an incomplete React entry and backed up the original to ${backupPath}.`,
+    persist: false,
   })
 
   return { files: nextFiles, repairs }
@@ -774,9 +814,10 @@ async function startRunner(body, user) {
     ? await readProjectFilesForRunner(user, body.projectId).catch(() => [])
     : []
   const sourceFiles = storedFiles.length ? storedFiles : clientFiles
-  let repairResult = repairCommonJsxMistakes(sourceFiles)
+  const restoreResult = restoreRecoveredReactEntries(sourceFiles)
+  let repairResult = repairCommonJsxMistakes(restoreResult.files)
   let files = repairResult.files
-  const repairs = [...repairResult.repairs]
+  const repairs = [...restoreResult.repairs, ...repairResult.repairs]
   if (files.length === 0) throw Object.assign(new Error('Cloud Runner needs saved project files.'), { status: 400 })
   let repairsPersisted = false
 
@@ -903,7 +944,10 @@ async function startRunner(body, user) {
   }
 
   if (repairs.length) {
-    repairsPersisted = await saveRepairedProjectFiles(user, body.projectId, files).catch(() => false)
+    const hasRunOnlyRepair = repairs.some((repair) => repair.persist === false)
+    repairsPersisted = hasRunOnlyRepair
+      ? false
+      : await saveRepairedProjectFiles(user, body.projectId, files).catch(() => false)
     diagnostics.repairsPersisted = repairsPersisted
     logs.push(repairsPersisted ? 'Auto repair saved back to the project.' : 'Auto repair used for this run only.')
   }
