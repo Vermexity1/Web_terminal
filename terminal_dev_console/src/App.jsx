@@ -1507,6 +1507,24 @@ function getManagedNpmScript(command) {
   return ''
 }
 
+function getPackageInstallRequest(command) {
+  const tokens = tokenizeCommandLine(command)
+  const executable = tokens[0]?.toLowerCase()
+  if (executable === 'npm' && ['install', 'i', 'ci', 'add'].includes(tokens[1]?.toLowerCase())) {
+    return { command: 'npm', args: tokens.slice(1), label: tokens.join(' ') }
+  }
+
+  if (executable === 'pnpm' && ['install', 'i', 'add'].includes(tokens[1]?.toLowerCase())) {
+    return { command: 'pnpm', args: tokens.slice(1), label: tokens.join(' ') }
+  }
+
+  if (executable === 'yarn' && (!tokens[1] || ['install', 'add'].includes(tokens[1]?.toLowerCase()))) {
+    return { command: 'yarn', args: tokens.slice(1), label: tokens.join(' ') || 'yarn install' }
+  }
+
+  return null
+}
+
 function shouldOpenCloudPreviewForCommand(command) {
   const normalized = command.trim().replace(/\s+/g, ' ')
   return !normalized || /^\s*(npm\s+(run\s+)?(dev|start)|npm\s+start|pnpm\s+(dev|start)|yarn\s+(dev|start)|npx\s+vite|vite|next\s+dev|react-scripts\s+start|python3?\s+-m\s+http\.server|flask\s+run|uvicorn\b|streamlit\s+run)\b/i
@@ -3930,6 +3948,58 @@ runpy.run_path(target, run_name="__main__")
     }
   }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, saveAllDirtyTabs, webcontainer, writeTerminal])
 
+  const runPackageInstall = useCallback(
+    async (request = { command: 'npm', args: ['install'], label: 'npm install' }) => {
+      const commandText = [request.command, ...(request.args || [])].join(' ')
+      setActiveActivity('commands')
+      setBottomPanelTab('terminal')
+      setIsInstalling(true)
+      setOperationStatus(`Installing packages: ${commandText}`)
+      setLanguageStatus('Installing packages')
+
+      try {
+        if (!webcontainer) {
+          await startCloudRunner(commandText, { useWorkspaceFiles: true })
+          setOperationStatus(`Cloud install finished: ${commandText}`)
+          return
+        }
+
+        const installArgs = request.args || ['install']
+        const installMode = installArgs[0]?.toLowerCase()
+        const packages = installArgs.slice(1).filter((arg) => arg && !arg.startsWith('-'))
+        const needsPackageJson = request.command === 'npm' && ['install', 'i', 'ci'].includes(installMode) && packages.length === 0
+
+        if (needsPackageJson) {
+          try {
+            await webcontainer.fs.readFile('package.json')
+          } catch {
+            const message = 'npm install needs a package.json. Open a real project folder first, or run npm install <package-name>.'
+            writeTerminal(`\r\n\x1b[1;33m${message}\x1b[0m\r\n`)
+            setOperationStatus(message)
+            addProblem('npm install', message)
+            return
+          }
+        }
+
+        await saveAllDirtyTabs({ silent: true })
+        const exitCode = await runProcess(webcontainer, request.command, installArgs, request.label || commandText)
+        await refreshExplorer(webcontainer)
+        await detectProjectDetails(webcontainer)
+        await saveCurrentSnapshot(webcontainer)
+        setOperationStatus(exitCode === 0 ? `Installed packages with ${commandText}.` : `${commandText} exited with code ${exitCode}.`)
+      } catch (error) {
+        const message = error?.message || String(error)
+        writeTerminal(`\r\n\x1b[1;31mInstall failed:\x1b[0m ${message}\r\n`)
+        setOperationStatus(`Install failed: ${message}`)
+        addProblem('npm install', message)
+      } finally {
+        setIsInstalling(false)
+        setLanguageStatus('Node ready')
+      }
+    },
+    [addProblem, detectProjectDetails, refreshExplorer, runProcess, saveAllDirtyTabs, saveCurrentSnapshot, startCloudRunner, webcontainer, writeTerminal],
+  )
+
   const runTerminalCommand = useCallback((command) => {
     const pythonRequest = getPythonCommandRequest(command)
     if (pythonRequest) {
@@ -3944,6 +4014,12 @@ runpy.run_path(target, run_name="__main__")
     const webTerminalRequest = getWebTerminalCommandRequest(command)
     if (webTerminalRequest) {
       handleWebTerminalCommand(webTerminalRequest, command)
+      return
+    }
+
+    const packageInstallRequest = getPackageInstallRequest(command)
+    if (packageInstallRequest) {
+      runPackageInstall(packageInstallRequest)
       return
     }
 
@@ -3964,22 +4040,29 @@ runpy.run_path(target, run_name="__main__")
 
     terminalApiRef.current.run(command)
     setOperationStatus(`Running: ${command}`)
-  }, [handleWebTerminalCommand, runPythonRequest, startCloudRunner, startDevServer, webcontainer])
+  }, [handleWebTerminalCommand, runPackageInstall, runPythonRequest, startCloudRunner, startDevServer, webcontainer])
 
   const runCloudCommand = useCallback((event) => {
     event?.preventDefault?.()
     const command = cloudCommandDraft.trim()
     if (!command) return
 
+    const packageInstallRequest = getPackageInstallRequest(command)
+    if (packageInstallRequest) {
+      runPackageInstall(packageInstallRequest)
+      setCloudCommandDraft('')
+      return
+    }
+
     startCloudRunner(command, {
       openInNewTab: shouldOpenCloudPreviewForCommand(command),
       useWorkspaceFiles: true,
     })
     setCloudCommandDraft('')
-  }, [cloudCommandDraft, startCloudRunner])
+  }, [cloudCommandDraft, runPackageInstall, startCloudRunner])
 
   const interceptTerminalCommand = useCallback((command) => {
-    if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command) || getManagedNpmScript(command)) {
+    if (getPythonCommandRequest(command) || getWebTerminalCommandRequest(command) || getPackageInstallRequest(command) || getManagedNpmScript(command)) {
       runTerminalCommand(command)
       return true
     }
@@ -5643,7 +5726,14 @@ runpy.run_path(target, run_name="__main__")
           <button type="button" disabled={!webcontainer || tree.length === 0} onClick={exportProject}>Export ZIP</button>
           <button type="button" disabled={isImporting} onClick={loadDemoGame}>Demo Game</button>
           <button type="button" disabled={!activeTab} onClick={runActiveFile}>Run File</button>
-          <button type="button" onClick={() => runTerminalCommand('npm install')}>Install</button>
+          <button
+            type="button"
+            className={`install-action ${isInstalling ? 'is-installing' : ''}`}
+            disabled={isInstalling}
+            onClick={() => runPackageInstall({ command: 'npm', args: ['install'], label: 'npm install' })}
+          >
+            {isInstalling ? 'Installing...' : 'Install'}
+          </button>
           <button type="button" onClick={() => preferCloudPreview ? startCloudRunner('npm run dev', { openInNewTab: true, useWorkspaceFiles: true }) : webcontainer ? startDevServer(undefined, 'dev') : startCloudRunner('npm run dev', { openInNewTab: true, useWorkspaceFiles: true })}>Run Dev</button>
           <button type="button" onClick={() => preferCloudPreview ? startCloudRunner('npm start', { openInNewTab: true, useWorkspaceFiles: true }) : webcontainer ? startDevServer(undefined, 'start') : startCloudRunner('npm start', { openInNewTab: true, useWorkspaceFiles: true })}>Run Start</button>
           <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true, useWorkspaceFiles: true })}>Cloud Run</button>
@@ -5867,7 +5957,14 @@ runpy.run_path(target, run_name="__main__")
           {tree.length > 0 && showOnboarding ? (
             <div className="onboarding-strip">
               <span>Next: run npm scripts for web apps, or open a Python file and use Run File.</span>
-              <button type="button" onClick={() => runTerminalCommand('npm install')}>npm install</button>
+              <button
+                type="button"
+                className={`install-action ${isInstalling ? 'is-installing' : ''}`}
+                disabled={isInstalling}
+                onClick={() => runPackageInstall({ command: 'npm', args: ['install'], label: 'npm install' })}
+              >
+                {isInstalling ? 'Installing...' : 'npm install'}
+              </button>
               <button type="button" onClick={runActiveFile} disabled={!activeTab}>Run File</button>
               <button type="button" onClick={() => preferCloudPreview ? startCloudRunner(projectScripts.some((script) => script.command === 'npm run dev') ? 'npm run dev' : 'npm start', { openInNewTab: true, useWorkspaceFiles: true }) : webcontainer ? startDevServer(undefined, projectScripts.some((script) => script.command === 'npm run dev') ? 'dev' : 'start') : startCloudRunner('', { openInNewTab: true, useWorkspaceFiles: true })}>
                 Run app
@@ -6116,7 +6213,14 @@ runpy.run_path(target, run_name="__main__")
                   <button type="submit" disabled={cloudRunner.status === 'starting'}>Run</button>
                 </form>
                 <div>
-                  <button type="button" onClick={() => { setCloudCommandDraft('npm install'); startCloudRunner('npm install', { useWorkspaceFiles: true }) }}>npm install</button>
+                  <button
+                    type="button"
+                    className={`install-action ${isInstalling ? 'is-installing' : ''}`}
+                    disabled={isInstalling}
+                    onClick={() => runPackageInstall({ command: 'npm', args: ['install'], label: 'npm install' })}
+                  >
+                    {isInstalling ? 'Installing...' : 'npm install'}
+                  </button>
                   <button type="button" onClick={() => { setCloudCommandDraft('npm run build'); startCloudRunner('npm run build', { useWorkspaceFiles: true }) }}>Build</button>
                   <button type="button" onClick={() => startCloudRunner('npm run dev', { openInNewTab: true, useWorkspaceFiles: true })}>Dev</button>
                   <button type="button" onClick={() => startCloudRunner('', { openInNewTab: true, useWorkspaceFiles: true })}>Cloud Run</button>

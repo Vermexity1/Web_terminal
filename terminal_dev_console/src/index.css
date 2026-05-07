@@ -975,6 +975,32 @@ button {
   font-weight: 700;
 }
 
+.install-action.is-installing {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: rgba(96, 165, 250, 0.58);
+  color: #dbeafe;
+  background: rgba(37, 99, 235, 0.2);
+}
+
+.install-action.is-installing::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(219, 234, 254, 0.28);
+  border-top-color: #60a5fa;
+  border-radius: 999px;
+  animation: install-spin 0.72s linear infinite;
+}
+
+@keyframes install-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .session-chip {
   min-width: 132px;
   max-width: 190px;
