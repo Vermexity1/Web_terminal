@@ -12,6 +12,7 @@ export default defineConfig({
           const handlers = {
             '/api/auth': () => import('./api/auth.js'),
             '/api/cloud-runner': () => import('./api/cloud-runner.js'),
+            '/api/personal-runner': () => import('./api/personal-runner.js'),
             '/api/projects': () => import('./api/projects.js'),
             '/api/settings': () => import('./api/settings.js'),
           }

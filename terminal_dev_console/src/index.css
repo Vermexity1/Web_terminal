@@ -2132,6 +2132,227 @@ button:disabled {
   scrollbar-width: auto;
 }
 
+.personal-runner-panel {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) minmax(110px, 0.72fr);
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(87, 107, 132, 0.22);
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.14), transparent 42%),
+    #050914;
+}
+
+.personal-runner-panel.is-active {
+  display: grid;
+}
+
+.personal-runner-header,
+.personal-runner-card-title,
+.personal-runner-log > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.personal-runner-header strong,
+.personal-runner-header span,
+.personal-runner-card-title strong,
+.personal-runner-card-title span,
+.personal-runner-log strong,
+.personal-runner-log span {
+  display: block;
+  min-width: 0;
+}
+
+.personal-runner-header strong,
+.personal-runner-card-title strong,
+.personal-runner-log strong {
+  color: #edf2ff;
+  font-size: 0.82rem;
+}
+
+.personal-runner-header span,
+.personal-runner-card-title span,
+.personal-runner-log span {
+  overflow: hidden;
+  color: #93c5fd;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personal-runner-header > div:last-child,
+.personal-runner-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.personal-runner-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(190px, 0.9fr) minmax(220px, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+
+.personal-runner-card {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.58);
+}
+
+.personal-runner-card p {
+  margin: 0;
+  color: #9fb1c8;
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.personal-runner-card label {
+  display: grid;
+  gap: 5px;
+  color: #9fb1c8;
+  font-size: 0.7rem;
+}
+
+.personal-runner-card textarea {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 7px;
+  padding: 8px;
+  color: #dbeafe;
+  background: #020617;
+  font: 0.7rem/1.35 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+}
+
+.pairing-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  border-radius: 7px;
+  background: rgba(37, 99, 235, 0.13);
+}
+
+.pairing-code span {
+  color: #93c5fd;
+  font-size: 0.72rem;
+}
+
+.pairing-code strong {
+  color: #eff6ff;
+  font: 0.95rem 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  letter-spacing: 0;
+}
+
+.runner-list {
+  min-height: 0;
+  display: grid;
+  gap: 7px;
+  overflow: auto;
+}
+
+.runner-list button {
+  min-width: 0;
+  height: auto;
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+  padding: 8px;
+  text-align: left;
+}
+
+.runner-list button.is-selected {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(37, 99, 235, 0.24);
+}
+
+.runner-list small {
+  max-width: 100%;
+  overflow: hidden;
+  color: #7f96af;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personal-runner-command {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.personal-runner-command input {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 7px;
+  padding: 0 9px;
+  color: #dbeafe;
+  background: #020617;
+}
+
+.personal-runner-panel button,
+.personal-runner-panel a {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 6px;
+  color: #dce8f8;
+  background: rgba(37, 99, 235, 0.16);
+  cursor: pointer;
+  font-size: 0.72rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.personal-runner-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.personal-runner-log {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 7px;
+}
+
+.personal-runner-log pre {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 7px;
+  padding: 10px;
+  color: #dbeafe;
+  background: rgba(2, 6, 23, 0.72);
+  font: 0.75rem/1.45 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .problems-panel {
   display: none;
   flex: 1;
@@ -4089,5 +4310,14 @@ body.is-resizing * {
     display: grid;
     grid-column: 2;
     grid-row: 2 / 5;
+  }
+
+  .personal-runner-panel {
+    grid-template-rows: auto minmax(0, 1fr) minmax(120px, 0.45fr);
+  }
+
+  .personal-runner-grid {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
   }
 }

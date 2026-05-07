@@ -24,6 +24,9 @@ function emptyStore() {
     emailToUserId: {},
     sessions: {},
     projects: {},
+    personalRunnerPairings: {},
+    personalRunners: {},
+    personalRunnerJobs: {},
   }
 }
 

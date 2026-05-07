@@ -2414,6 +2414,15 @@ export default function App() {
     error: '',
     diagnostics: null,
   })
+  const [personalRunner, setPersonalRunner] = useState({
+    status: 'No personal runner paired yet.',
+    runners: [],
+    jobs: [],
+    pairing: null,
+    selectedRunnerId: '',
+    commandDraft: 'npm run dev',
+    activeJobId: '',
+  })
   const [isInstalling, setIsInstalling] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [operationStatus, setOperationStatus] = useState('')
@@ -3189,6 +3198,13 @@ export default function App() {
       }).catch(() => {})
       setCloudRunner((runner) => ({ ...runner, status: 'stopped', sandboxId: '', commandId: '', proxyCommandId: '', previewUrl: '' }))
     }
+    if (personalRunner.activeJobId) {
+      apiRequest('/api/personal-runner', {
+        method: 'POST',
+        body: { action: 'stopJob', jobId: personalRunner.activeJobId },
+      }).catch(() => {})
+      setPersonalRunner((runner) => ({ ...runner, activeJobId: '', status: 'Personal Runner stop requested before switching projects.' }))
+    }
     if (webcontainer && activeCloudProject?.id) {
       try {
         setProjectHubStatus('Saving project before switching...')
@@ -3215,7 +3231,7 @@ export default function App() {
     bootStartedRef.current = false
     setActiveCloudProject(null)
     setProjectHubStatus((status) => status || 'Choose a project to continue.')
-  }, [activeCloudProject, cloudRunner.sandboxId, loadCloudProjects, saveAllDirtyTabs, stopDevServer, webcontainer])
+  }, [activeCloudProject, cloudRunner.sandboxId, loadCloudProjects, personalRunner.activeJobId, saveAllDirtyTabs, stopDevServer, webcontainer])
 
   const saveActiveFile = useCallback(async () => {
     if (!activeTab) return
@@ -4110,6 +4126,200 @@ runpy.run_path(target, run_name="__main__")
       addProblem('Cloud Runner', error.message)
     }
   }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, openCloudPreviewHandoff, publishCloudPreviewHandoff, saveAllDirtyTabs, showPopupHelp, webcontainer, writeTerminal])
+
+  const refreshPersonalRunners = useCallback(async (options = {}) => {
+    if (!currentUser) return
+
+    try {
+      const data = await apiRequest('/api/personal-runner')
+      const runners = data.runners || []
+      const jobs = data.jobs || []
+      const activeJob = jobs.find((job) => job.id === personalRunner.activeJobId)
+        || jobs.find((job) => job.previewUrl && ['running', 'finished'].includes(job.status))
+        || jobs[0]
+      const onlineRunner = runners.find((runner) => runner.status !== 'offline')
+
+      setPersonalRunner((current) => ({
+        ...current,
+        runners,
+        jobs,
+        selectedRunnerId: current.selectedRunnerId || onlineRunner?.id || runners[0]?.id || '',
+        activeJobId: current.activeJobId || activeJob?.id || '',
+        status: onlineRunner
+          ? `${onlineRunner.name} is ${onlineRunner.status}.`
+          : (runners.length ? 'All personal runners are offline.' : 'No personal runner paired yet.'),
+      }))
+
+      if (activeJob?.previewUrl && activeJob.previewUrl !== previewUrl) {
+        clearStaticPreview()
+        setPreviewUrl(activeJob.previewUrl)
+        setPreviewKey((key) => key + 1)
+        setDevStatus('Personal Runner')
+        setPreviewStatus(`Personal Runner preview connected from ${activeJob.projectName || 'your project'}.`)
+      }
+    } catch (error) {
+      if (!options.silent) {
+        setPersonalRunner((current) => ({ ...current, status: `Personal Runner refresh failed: ${error.message}` }))
+      }
+    }
+  }, [clearStaticPreview, currentUser, personalRunner.activeJobId, previewUrl])
+
+  const createPersonalRunnerPairing = useCallback(async () => {
+    try {
+      const data = await apiRequest('/api/personal-runner', {
+        method: 'POST',
+        body: {
+          action: 'createPairing',
+          name: `${currentUser?.name || currentUser?.email || 'My'} Personal Runner`,
+        },
+      })
+      setPersonalRunner((current) => ({
+        ...current,
+        pairing: data.pairing,
+        status: `Pairing code ${data.pairing.code} created. Run the command on your laptop or PC.`,
+      }))
+      setBottomPanelTab('personal')
+    } catch (error) {
+      setPersonalRunner((current) => ({ ...current, status: `Pairing failed: ${error.message}` }))
+      addProblem('Personal Runner', error.message)
+    }
+  }, [addProblem, currentUser])
+
+  const setPersonalRunnerCommand = useCallback((command) => {
+    setPersonalRunner((current) => ({ ...current, commandDraft: command }))
+  }, [])
+
+  const setSelectedPersonalRunner = useCallback((runnerId) => {
+    setPersonalRunner((current) => ({ ...current, selectedRunnerId: runnerId }))
+  }, [])
+
+  const startPersonalRunnerJob = useCallback(async (commandOverride = '', options = {}) => {
+    const activeProject = activeCloudProjectRef.current || activeCloudProject
+    if (!activeProject?.id) {
+      setPersonalRunner((current) => ({ ...current, status: 'Create or open a project before using a Personal Runner.' }))
+      return
+    }
+
+    const command = String(commandOverride || personalRunner.commandDraft || 'npm run dev').trim() || 'npm run dev'
+
+    try {
+      setActiveActivity('preview')
+      setBottomPanelTab('personal')
+      setPersonalRunner((current) => ({ ...current, status: `Sending ${command} to Personal Runner...` }))
+      await saveAllDirtyTabs({ silent: true })
+
+      let files = activeProject.files || []
+      if (webcontainer && (workspaceProjectIdRef.current === activeProject.id || options.useWorkspaceFiles !== false)) {
+        const workspaceFiles = await readWorkspaceFiles(webcontainer)
+        if (workspaceFiles.length) files = workspaceFiles
+      } else {
+        files = (activeCloudProjectRef.current || activeProject).files || []
+      }
+
+      if (!files.length) {
+        throw new Error('Personal Runner needs project files. Upload a folder or load the demo first.')
+      }
+
+      const data = await apiRequest('/api/personal-runner', {
+        method: 'POST',
+        body: {
+          action: 'enqueueJob',
+          runnerId: personalRunner.selectedRunnerId,
+          projectId: activeProject.id,
+          projectName: projectNameRef.current || activeProject.name,
+          command,
+          files: filesForApi(files),
+          install: options.install !== false,
+          expectsPreview: options.expectsPreview ?? shouldOpenCloudPreviewForCommand(command),
+          port: defaultRunPort,
+        },
+      })
+
+      setPersonalRunner((current) => ({
+        ...current,
+        activeJobId: data.job.id,
+        commandDraft: command,
+        status: `Queued ${command} on your Personal Runner.`,
+      }))
+      setOperationStatus(`Personal Runner job queued: ${command}`)
+      refreshPersonalRunners({ silent: true })
+    } catch (error) {
+      setPersonalRunner((current) => ({ ...current, status: `Personal Runner failed: ${error.message}` }))
+      setOperationStatus(`Personal Runner failed: ${error.message}`)
+      addProblem('Personal Runner', error.message)
+    }
+  }, [activeCloudProject, addProblem, personalRunner.commandDraft, personalRunner.selectedRunnerId, refreshPersonalRunners, saveAllDirtyTabs, webcontainer])
+
+  const stopPersonalRunnerJob = useCallback(async (jobId = personalRunner.activeJobId) => {
+    if (!jobId) {
+      setPersonalRunner((current) => ({ ...current, status: 'No Personal Runner job is active.' }))
+      return
+    }
+
+    try {
+      await apiRequest('/api/personal-runner', {
+        method: 'POST',
+        body: { action: 'stopJob', jobId },
+      })
+      setPersonalRunner((current) => ({ ...current, status: 'Stop requested for Personal Runner job.' }))
+      refreshPersonalRunners({ silent: true })
+    } catch (error) {
+      setPersonalRunner((current) => ({ ...current, status: `Stop failed: ${error.message}` }))
+      addProblem('Personal Runner', error.message)
+    }
+  }, [addProblem, personalRunner.activeJobId, refreshPersonalRunners])
+
+  const forgetPersonalRunner = useCallback(async (runnerId) => {
+    if (!runnerId) return
+    try {
+      await apiRequest('/api/personal-runner', {
+        method: 'POST',
+        body: { action: 'forgetRunner', runnerId },
+      })
+      setPersonalRunner((current) => ({
+        ...current,
+        selectedRunnerId: current.selectedRunnerId === runnerId ? '' : current.selectedRunnerId,
+        status: 'Personal Runner forgotten.',
+      }))
+      refreshPersonalRunners({ silent: true })
+    } catch (error) {
+      setPersonalRunner((current) => ({ ...current, status: `Could not forget runner: ${error.message}` }))
+      addProblem('Personal Runner', error.message)
+    }
+  }, [addProblem, refreshPersonalRunners])
+
+  useEffect(() => {
+    if (!currentUser) return undefined
+
+    refreshPersonalRunners({ silent: true })
+    const timer = window.setInterval(() => {
+      refreshPersonalRunners({ silent: true })
+    }, 3500)
+
+    return () => window.clearInterval(timer)
+  }, [currentUser, refreshPersonalRunners])
+
+  useEffect(() => {
+    if (!currentUser || !personalRunner.activeJobId) return undefined
+
+    const stopPersonalRunnerOnLeave = () => {
+      fetch('/api/personal-runner', {
+        method: 'POST',
+        credentials: 'include',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stopJob', jobId: personalRunner.activeJobId }),
+      }).catch(() => {})
+    }
+
+    window.addEventListener('pagehide', stopPersonalRunnerOnLeave)
+    window.addEventListener('beforeunload', stopPersonalRunnerOnLeave)
+
+    return () => {
+      window.removeEventListener('pagehide', stopPersonalRunnerOnLeave)
+      window.removeEventListener('beforeunload', stopPersonalRunnerOnLeave)
+    }
+  }, [currentUser, personalRunner.activeJobId])
 
   const runPackageInstall = useCallback(
     async (request = { command: 'npm', args: ['install'], label: 'npm install' }) => {
@@ -5810,6 +6020,20 @@ runpy.run_path(target, run_name="__main__")
     ['Auto repairs', cloudDiagnostics.repairs?.length ? `${cloudDiagnostics.repairs.length} JSX repair(s)` : 'none'],
     ['Repairs saved', cloudDiagnostics.repairs?.length ? (cloudDiagnostics.repairsPersisted ? 'yes' : 'this run only') : 'none'],
   ]
+  const activePersonalJob = personalRunner.jobs.find((job) => job.id === personalRunner.activeJobId)
+    || personalRunner.jobs.find((job) => ['queued', 'accepted', 'installing', 'running', 'cancel_requested'].includes(job.status))
+    || personalRunner.jobs[0]
+  const selectedPersonalRunner = personalRunner.runners.find((runner) => runner.id === personalRunner.selectedRunnerId)
+    || personalRunner.runners.find((runner) => runner.status !== 'offline')
+    || personalRunner.runners[0]
+  const personalRunnerServerUrl = window.location.origin
+  const personalRunnerPowerShellCommand = personalRunner.pairing
+    ? `iwr ${personalRunnerServerUrl}/personal-runner.mjs -OutFile personal-runner.mjs; node .\\personal-runner.mjs --server ${personalRunnerServerUrl} --token ${personalRunner.pairing.token}`
+    : ''
+  const personalRunnerMacLinuxCommand = personalRunner.pairing
+    ? `curl -L ${personalRunnerServerUrl}/personal-runner.mjs -o personal-runner.mjs && node personal-runner.mjs --server ${personalRunnerServerUrl} --token ${personalRunner.pairing.token}`
+    : ''
+  const personalRunnerLogs = activePersonalJob?.logs || 'No Personal Runner jobs yet.'
 
   if (authLoading) {
     return (
@@ -6262,6 +6486,13 @@ runpy.run_path(target, run_name="__main__")
                 Commands
               </button>
               <button
+                className={bottomPanelTab === 'personal' ? 'is-active' : ''}
+                type="button"
+                onClick={() => selectBottomPanelTab('personal')}
+              >
+                Personal
+              </button>
+              <button
                 className={bottomPanelTab === 'problems' ? 'is-active' : ''}
                 type="button"
                 onClick={() => selectBottomPanelTab('problems')}
@@ -6330,6 +6561,106 @@ runpy.run_path(target, run_name="__main__")
             </div>
             <div className="command-note">
               Windows commands are mapped to WebContainer shell equivalents. Python commands run through a real Pyodide runtime in the browser.
+            </div>
+          </div>
+          <div className={`personal-runner-panel ${bottomPanelTab === 'personal' ? 'is-active' : ''}`}>
+            <div className="personal-runner-header">
+              <div>
+                <strong>Personal Runner</strong>
+                <span>{personalRunner.status}</span>
+              </div>
+              <div>
+                <button type="button" onClick={createPersonalRunnerPairing}>Pair Device</button>
+                <button type="button" onClick={() => refreshPersonalRunners()}>Refresh</button>
+                <button type="button" disabled={!activePersonalJob?.id} onClick={() => stopPersonalRunnerJob(activePersonalJob?.id)}>Stop Job</button>
+              </div>
+            </div>
+            <div className="personal-runner-grid">
+              <section className="personal-runner-card">
+                <div className="personal-runner-card-title">
+                  <strong>1. Link Your PC</strong>
+                  <span>Run this on the computer that should execute code.</span>
+                </div>
+                {personalRunner.pairing ? (
+                  <>
+                    <div className="pairing-code">
+                      <span>Pairing code</span>
+                      <strong>{personalRunner.pairing.code}</strong>
+                    </div>
+                    <label>
+                      Windows PowerShell
+                      <textarea readOnly value={personalRunnerPowerShellCommand} />
+                    </label>
+                    <label>
+                      Mac / Linux
+                      <textarea readOnly value={personalRunnerMacLinuxCommand} />
+                    </label>
+                  </>
+                ) : (
+                  <p>Create a pairing token, then paste the command into your own laptop or PC terminal. Other users must pair their own computers.</p>
+                )}
+              </section>
+              <section className="personal-runner-card">
+                <div className="personal-runner-card-title">
+                  <strong>2. Choose Runner</strong>
+                  <span>{selectedPersonalRunner ? `${selectedPersonalRunner.name} is ${selectedPersonalRunner.status}` : 'No runner online yet.'}</span>
+                </div>
+                <div className="runner-list">
+                  {personalRunner.runners.length ? personalRunner.runners.map((runner) => (
+                    <button
+                      type="button"
+                      key={runner.id}
+                      className={runner.id === personalRunner.selectedRunnerId ? 'is-selected' : ''}
+                      onClick={() => setSelectedPersonalRunner(runner.id)}
+                    >
+                      <span>{runner.name}</span>
+                      <small>{runner.status} {runner.platform ? `- ${runner.platform}` : ''}</small>
+                    </button>
+                  )) : (
+                    <p>No paired devices yet.</p>
+                  )}
+                </div>
+                <button type="button" disabled={!selectedPersonalRunner?.id} onClick={() => forgetPersonalRunner(selectedPersonalRunner?.id)}>
+                  Forget Selected
+                </button>
+              </section>
+              <section className="personal-runner-card personal-runner-run-card">
+                <div className="personal-runner-card-title">
+                  <strong>3. Run Project</strong>
+                  <span>Runs on the selected PC and sends the tunnel preview back here.</span>
+                </div>
+                <form
+                  className="personal-runner-command"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    startPersonalRunnerJob(personalRunner.commandDraft)
+                  }}
+                >
+                  <input
+                    value={personalRunner.commandDraft}
+                    onChange={(event) => setPersonalRunnerCommand(event.target.value)}
+                    placeholder="npm run dev"
+                    spellCheck="false"
+                  />
+                  <button type="submit" disabled={!selectedPersonalRunner || selectedPersonalRunner.status === 'offline'}>Run</button>
+                </form>
+                <div className="personal-runner-actions">
+                  <button type="button" disabled={!selectedPersonalRunner || selectedPersonalRunner.status === 'offline'} onClick={() => startPersonalRunnerJob('npm install', { install: false, expectsPreview: false })}>Install</button>
+                  <button type="button" disabled={!selectedPersonalRunner || selectedPersonalRunner.status === 'offline'} onClick={() => startPersonalRunnerJob('npm run build', { expectsPreview: false })}>Build</button>
+                  <button type="button" disabled={!selectedPersonalRunner || selectedPersonalRunner.status === 'offline'} onClick={() => startPersonalRunnerJob('npm run dev', { expectsPreview: true })}>Dev</button>
+                  <button type="button" disabled={!selectedPersonalRunner || selectedPersonalRunner.status === 'offline'} onClick={() => startPersonalRunnerJob('npm start', { expectsPreview: true })}>Start</button>
+                </div>
+                {activePersonalJob?.previewUrl ? (
+                  <a href={activePersonalJob.previewUrl} target="_blank" rel="noreferrer">Open Personal Preview</a>
+                ) : null}
+              </section>
+            </div>
+            <div className="personal-runner-log">
+              <div>
+                <strong>{activePersonalJob ? `${activePersonalJob.command} - ${activePersonalJob.status}` : 'Runner Log'}</strong>
+                <span>{activePersonalJob?.previewUrl || 'Preview URL appears here when the runner tunnel is ready.'}</span>
+              </div>
+              <pre>{personalRunnerLogs}</pre>
             </div>
           </div>
           <div className={`problems-panel ${bottomPanelTab === 'problems' ? 'is-active' : ''}`}>
