@@ -28,6 +28,25 @@
           linear-gradient(180deg, #05070d, #020617);
       }
 
+      iframe {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        display: none;
+        border: 0;
+        background: #fff;
+      }
+
+      body.is-projecting {
+        display: block;
+        background: #020617;
+      }
+
+      body.is-projecting iframe {
+        display: block;
+      }
+
       main {
         width: min(620px, calc(100vw - 32px));
         display: grid;
@@ -39,6 +58,19 @@
         box-shadow: 0 26px 90px rgba(0, 0, 0, 0.55), 0 0 40px rgba(37, 99, 235, 0.2);
       }
 
+      body.is-projecting main {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        z-index: 2;
+        width: min(440px, calc(100vw - 28px));
+        gap: 8px;
+        padding: 12px;
+        border-radius: 10px;
+        background: rgba(2, 6, 23, 0.88);
+        backdrop-filter: blur(14px);
+      }
+
       .mark {
         width: 42px;
         height: 42px;
@@ -47,6 +79,12 @@
         border-radius: 10px;
         background: #07111f;
         box-shadow: inset 0 0 20px rgba(59, 130, 246, 0.18), 0 0 30px rgba(59, 130, 246, 0.2);
+      }
+
+      body.is-projecting .mark,
+      body.is-projecting #message,
+      body.is-projecting pre {
+        display: none;
       }
 
       .mark::before,
@@ -81,6 +119,10 @@
         letter-spacing: 0;
       }
 
+      body.is-projecting h1 {
+        font-size: 0.82rem;
+      }
+
       p {
         color: #bfdbfe;
         line-height: 1.55;
@@ -98,6 +140,13 @@
         color: #dbeafe;
       }
 
+      body.is-projecting .status {
+        min-height: 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+      }
+
       .spinner {
         width: 18px;
         height: 18px;
@@ -106,6 +155,13 @@
         border-top-color: #60a5fa;
         border-radius: 999px;
         animation: spin 0.8s linear infinite;
+      }
+
+      body.is-projecting .spinner {
+        width: 8px;
+        height: 8px;
+        border: 0;
+        background: #22c55e;
       }
 
       pre {
@@ -146,6 +202,10 @@
         gap: 8px;
       }
 
+      body.is-projecting .actions {
+        justify-content: flex-end;
+      }
+
       .is-error .spinner,
       .is-finished .spinner {
         animation: none;
@@ -160,6 +220,7 @@
     </style>
   </head>
   <body>
+    <iframe id="preview" title="Running cloud project preview" allow="clipboard-read; clipboard-write; fullscreen; geolocation; microphone; camera; autoplay" sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts"></iframe>
     <main id="card">
       <div class="mark" aria-hidden="true"></div>
       <div>
@@ -188,8 +249,17 @@
       const logs = document.querySelector('#logs')
       const direct = document.querySelector('#direct')
       const retry = document.querySelector('#retry')
+      const preview = document.querySelector('#preview')
 
-      let redirected = false
+      let projectedUrl = ''
+
+      function projectPreview(url) {
+        if (!url || projectedUrl === url) return
+        projectedUrl = url
+        preview.src = url
+        document.body.classList.add('is-projecting')
+        document.title = 'Running Cloud Preview'
+      }
 
       function setState(payload = {}) {
         if (payload.runId && runId && payload.runId !== runId) return
@@ -197,21 +267,15 @@
         const nextMessage = payload.message || 'Waiting for the hosted sandbox to start your project.'
         card.className = `is-${status}`
         message.textContent = nextMessage
-        statusText.textContent = status === 'ready'
-          ? 'Preview ready. Redirecting...'
+        statusText.textContent = payload.previewUrl
+          ? 'Projecting cloud preview'
           : status.replace(/-/g, ' ')
         logs.textContent = payload.logs || logs.textContent || 'No logs yet.'
 
         if (payload.previewUrl) {
           direct.hidden = false
           direct.href = payload.previewUrl
-        }
-
-        if (payload.previewUrl && !redirected) {
-          redirected = true
-          window.setTimeout(() => {
-            location.replace(payload.previewUrl)
-          }, 250)
+          projectPreview(payload.previewUrl)
         }
       }
 
@@ -225,7 +289,15 @@
         }
       }
 
-      retry.addEventListener('click', loadStoredState)
+      retry.addEventListener('click', () => {
+        if (projectedUrl) {
+          preview.src = projectedUrl
+        }
+        loadStoredState()
+      })
+      preview.addEventListener('load', () => {
+        if (projectedUrl) statusText.textContent = 'Cloud preview loaded'
+      })
       loadStoredState()
       window.setInterval(loadStoredState, 1200)
 

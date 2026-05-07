@@ -5789,8 +5789,7 @@ runpy.run_path(target, run_name="__main__")
   const isStaticPreview = Boolean(staticPreviewUrl && !previewUrl)
   const localRuntimeReady = Boolean(webcontainer && !runtimeIssue)
   const preferCloudPreview = Boolean(!localRuntimeReady && runtimeIssue)
-  const isCloudPreview = Boolean(cloudRunner.previewUrl && displayPreviewUrl === cloudRunner.previewUrl)
-  const previewOpensInTab = Boolean(displayPreviewUrl && isCloudPreview && !isStaticPreview)
+  const previewOpensInTab = false
   const cloudDiagnostics = cloudRunner.diagnostics || {}
   const troubleshootRows = [
     ['Status', cloudRunner.status || 'idle'],
