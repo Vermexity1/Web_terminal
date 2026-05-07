@@ -2380,6 +2380,11 @@ export default function App() {
   const [previewKey, setPreviewKey] = useState(0)
   const [devStatus, setDevStatus] = useState('Stopped')
   const [previewStatus, setPreviewStatus] = useState('Waiting for a dev server.')
+  const [popupHelp, setPopupHelp] = useState(() => ({
+    visible: false,
+    status: localStorage.getItem('preview-popups-allowed') === 'true' ? 'allowed' : 'unknown',
+    message: '',
+  }))
   const [bridgePendingPort, setBridgePendingPort] = useState(0)
   const [cloudRunner, setCloudRunner] = useState({
     status: 'idle',
@@ -2506,6 +2511,99 @@ export default function App() {
       ...currentProblems,
     ].slice(0, 8))
   }, [])
+
+  const showPopupHelp = useCallback((message = 'Preview popup was blocked. Allow popups for this site, then open the preview again.') => {
+    try {
+      localStorage.removeItem('preview-popups-allowed')
+    } catch {
+      // Storage may be unavailable in strict browser modes.
+    }
+
+    setPopupHelp({
+      visible: true,
+      status: 'blocked',
+      message,
+    })
+    setPreviewStatus(message)
+    setOperationStatus('Allow popups for this site, then click Test Popups or Open Preview again.')
+  }, [])
+
+  const dismissPopupHelp = useCallback(() => {
+    setPopupHelp((current) => ({ ...current, visible: false }))
+  }, [])
+
+  const testPopupPermission = useCallback(() => {
+    const testWindow = window.open('', '_blank', 'width=420,height=320')
+
+    if (!testWindow) {
+      showPopupHelp('Popup test was blocked. Click Chrome\'s popup-blocked icon, allow popups for this site, then click Test Popups again.')
+      return
+    }
+
+    try {
+      testWindow.document.write(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Popups Allowed</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #030712;
+        color: #dbeafe;
+        font-family: Inter, system-ui, sans-serif;
+      }
+      main {
+        width: min(420px, calc(100vw - 32px));
+        border: 1px solid #2563eb;
+        border-radius: 12px;
+        background: #07111f;
+        padding: 24px;
+        box-shadow: 0 18px 54px rgba(0, 0, 0, 0.4);
+      }
+      strong { display: block; color: white; margin-bottom: 8px; }
+      span { color: #93c5fd; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <strong>Popups are allowed.</strong>
+      <span>You can close this tab. Cloud previews can open here now.</span>
+    </main>
+  </body>
+</html>`)
+      testWindow.document.close()
+      testWindow.opener = null
+      window.setTimeout(() => {
+        if (!testWindow.closed) testWindow.close()
+      }, 1100)
+    } catch {
+      // Some browsers prevent writing to the new tab after opening it.
+    }
+
+    try {
+      localStorage.setItem('preview-popups-allowed', 'true')
+    } catch {
+      // Storage may be unavailable in strict browser modes.
+    }
+
+    setPopupHelp({
+      visible: true,
+      status: 'allowed',
+      message: 'Popups are allowed. Run Cloud or Open Preview again to launch the project tab.',
+    })
+    setPreviewStatus('Popup test worked. Run Cloud or Open Preview again.')
+    setOperationStatus('Popups are allowed for preview tabs.')
+    window.setTimeout(() => {
+      setPopupHelp((current) => current.status === 'allowed'
+        ? { ...current, visible: false }
+        : current)
+    }, 2400)
+  }, [showPopupHelp])
 
   const connectPreview = useCallback((port, url, source = 'WebContainer') => {
     if (!url) return
@@ -3829,7 +3927,7 @@ runpy.run_path(target, run_name="__main__")
 </html>`)
         previewWindow.document.close()
       } else {
-        setPreviewStatus('Your browser blocked the preview tab. Click Open after Cloud Run finishes.')
+        showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Open Preview after Cloud finishes.')
       }
     }
 
@@ -3924,7 +4022,16 @@ runpy.run_path(target, run_name="__main__")
             previewWindow.location.replace(result.previewUrl)
             previewWindow.opener = null
           } catch {
-            window.open(result.previewUrl, '_blank', 'noopener,noreferrer')
+            const fallbackWindow = window.open(result.previewUrl, '_blank')
+            if (!fallbackWindow) {
+              showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Open Preview again.')
+            } else {
+              try {
+                fallbackWindow.opener = null
+              } catch {
+                // The browser can deny opener changes after navigation starts.
+              }
+            }
           }
         }
       }
@@ -3946,7 +4053,7 @@ runpy.run_path(target, run_name="__main__")
       setPreviewStatus(`Cloud Runner failed: ${error.message}`)
       addProblem('Cloud Runner', error.message)
     }
-  }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, saveAllDirtyTabs, webcontainer, writeTerminal])
+  }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, saveAllDirtyTabs, showPopupHelp, webcontainer, writeTerminal])
 
   const runPackageInstall = useCallback(
     async (request = { command: 'npm', args: ['install'], label: 'npm install' }) => {
@@ -4125,9 +4232,19 @@ runpy.run_path(target, run_name="__main__")
       return
     }
 
-    window.open(url, '_blank', 'noopener,noreferrer')
+    const previewWindow = window.open(url, '_blank')
+    if (!previewWindow) {
+      showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Open Preview again.')
+      return
+    }
+
+    try {
+      previewWindow.opener = null
+    } catch {
+      // The browser can deny opener changes after navigation starts.
+    }
     setPreviewStatus('Opened the preview in a new tab. This helps when a managed Chromebook blocks embedded iframes.')
-  }, [cloudRunner.previewUrl, previewUrl, staticPreviewUrl])
+  }, [cloudRunner.previewUrl, previewUrl, showPopupHelp, staticPreviewUrl])
 
   const buildStaticPreviewFallback = useCallback(async (options = {}) => {
     if (!webcontainer) {
@@ -5807,6 +5924,20 @@ runpy.run_path(target, run_name="__main__")
           </button>
         </div>
       </header>
+
+      {popupHelp.visible ? (
+        <section className={`popup-permission-banner is-${popupHelp.status}`} role="status" aria-live="polite">
+          <div>
+            <strong>{popupHelp.status === 'allowed' ? 'Popups Allowed' : 'Allow Popups'}</strong>
+            <span>
+              {popupHelp.message || 'Cloud previews open in a new tab. If Chrome blocks it, click the popup-blocked icon in the address bar and allow popups for this site.'}
+            </span>
+          </div>
+          <button type="button" onClick={testPopupPermission}>Test Popups</button>
+          <button type="button" disabled={!displayPreviewUrl} onClick={openPreviewInNewTab}>Open Preview</button>
+          <button type="button" onClick={dismissPopupHelp}>Dismiss</button>
+        </section>
+      ) : null}
 
       <aside className="activity-bar" aria-label="Activity">
         <button
