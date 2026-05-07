@@ -4232,6 +4232,17 @@ runpy.run_path(target, run_name="__main__")
       return
     }
 
+    const isStaticUrl = Boolean(staticPreviewUrl && url === staticPreviewUrl)
+    const isCloudUrl = Boolean(cloudRunner.previewUrl && url === cloudRunner.previewUrl)
+    const shouldOpenCloudInstead = isHostedApp() && !isStaticUrl && !isCloudUrl && activeCloudProjectRef.current?.id
+
+    if (shouldOpenCloudInstead) {
+      setPreviewStatus('Raw WebContainer preview links can 404 in hosted or locked browsers. Opening a Cloud Runner preview tab instead...')
+      setOperationStatus('Opening Cloud Runner so the preview tab uses a public sandbox URL.')
+      startCloudRunner('', { openInNewTab: true, useWorkspaceFiles: true })
+      return
+    }
+
     const previewWindow = window.open(url, '_blank')
     if (!previewWindow) {
       showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Open Preview again.')
@@ -4244,7 +4255,7 @@ runpy.run_path(target, run_name="__main__")
       // The browser can deny opener changes after navigation starts.
     }
     setPreviewStatus('Opened the preview in a new tab. This helps when a managed Chromebook blocks embedded iframes.')
-  }, [cloudRunner.previewUrl, previewUrl, showPopupHelp, staticPreviewUrl])
+  }, [cloudRunner.previewUrl, previewUrl, showPopupHelp, startCloudRunner, staticPreviewUrl])
 
   const buildStaticPreviewFallback = useCallback(async (options = {}) => {
     if (!webcontainer) {
@@ -6413,7 +6424,13 @@ runpy.run_path(target, run_name="__main__")
               />
               <div className="preview-live-bar">
                 <span>{previewStatus}</span>
-                <button type="button" onClick={openPreviewInNewTab}>Open raw</button>
+                <button
+                  type="button"
+                  title="Open the running project in a separate tab"
+                  onClick={openPreviewInNewTab}
+                >
+                  Open tab
+                </button>
               </div>
             </>
           ) : (
