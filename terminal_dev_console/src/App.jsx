@@ -393,6 +393,9 @@ const appThemes = [
 
 const aiSettingsStorageKey = 'ide-ai-settings-v1'
 const aiUsageStorageKey = 'ide-ai-usage-v1'
+const cloudPreviewHandoffPath = '/cloud-preview.html'
+const cloudPreviewChannelName = 'runable-cloud-preview'
+const cloudPreviewStoragePrefix = 'runable-cloud-preview:'
 const googleAiStudioApiKeyUrl = 'https://aistudio.google.com/app/apikey'
 const googleGeminiApiKeyDocsUrl = 'https://ai.google.dev/gemini-api/docs/api-key'
 const aiProviders = [
@@ -1399,6 +1402,21 @@ function buildStaticPreview(files) {
 function isHostedApp() {
   const host = window.location.hostname
   return !['localhost', '127.0.0.1', '::1'].includes(host)
+}
+
+function makeCloudPreviewRunId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function cloudPreviewStorageKey(runId) {
+  return `${cloudPreviewStoragePrefix}${runId}`
+}
+
+function cloudPreviewHandoffUrl(runId) {
+  const url = new URL(cloudPreviewHandoffPath, window.location.origin)
+  url.searchParams.set('run', runId)
+  return url.toString()
 }
 
 function detectFramework(packageJson) {
@@ -2600,9 +2618,51 @@ export default function App() {
     setOperationStatus('Popups are allowed for preview tabs.')
     window.setTimeout(() => {
       setPopupHelp((current) => current.status === 'allowed'
-        ? { ...current, visible: false }
-        : current)
+      ? { ...current, visible: false }
+      : current)
     }, 2400)
+  }, [showPopupHelp])
+
+  const publishCloudPreviewHandoff = useCallback((runId, payload = {}) => {
+    if (!runId) return
+
+    const message = {
+      runId,
+      updatedAt: Date.now(),
+      ...payload,
+    }
+
+    try {
+      localStorage.setItem(cloudPreviewStorageKey(runId), JSON.stringify(message))
+    } catch {
+      // The preview handoff still works through BroadcastChannel when storage is blocked.
+    }
+
+    if ('BroadcastChannel' in window) {
+      try {
+        const channel = new BroadcastChannel(cloudPreviewChannelName)
+        channel.postMessage(message)
+        channel.close()
+      } catch {
+        // Some locked browsers disable BroadcastChannel; localStorage is the fallback.
+      }
+    }
+  }, [])
+
+  const openCloudPreviewHandoff = useCallback((runId) => {
+    const previewWindow = window.open(cloudPreviewHandoffUrl(runId), '_blank')
+    if (!previewWindow) {
+      showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Cloud or Open Preview again.')
+      return null
+    }
+
+    try {
+      previewWindow.opener = null
+    } catch {
+      // The browser can deny opener changes after navigation starts.
+    }
+
+    return previewWindow
   }, [showPopupHelp])
 
   const connectPreview = useCallback((port, url, source = 'WebContainer') => {
@@ -3886,48 +3946,18 @@ runpy.run_path(target, run_name="__main__")
     const persistFilesBeforeRun = options.persistFilesBeforeRun ?? true
     let previewWindow = null
     let previewTabOpened = false
+    const previewRunId = options.openInNewTab ? makeCloudPreviewRunId() : ''
+    const updatePreviewTab = (payload) => publishCloudPreviewHandoff(previewRunId, payload)
 
     if (options.openInNewTab) {
-      previewWindow = window.open('', '_blank')
+      updatePreviewTab({
+        status: 'starting',
+        message: 'Booting hosted cloud preview...',
+        logs: 'Starting Cloud Runner...',
+      })
+      previewWindow = openCloudPreviewHandoff(previewRunId)
       if (previewWindow) {
         previewTabOpened = true
-        previewWindow.document.write(`<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Starting Cloud Preview</title>
-    <style>
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: #030712;
-        color: #dbeafe;
-        font-family: Inter, system-ui, sans-serif;
-      }
-      main {
-        width: min(560px, calc(100vw - 32px));
-        border: 1px solid #1d4ed8;
-        border-radius: 12px;
-        background: #07111f;
-        padding: 28px;
-      }
-      strong { display: block; color: white; margin-bottom: 8px; }
-      span { color: #93c5fd; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <strong>Starting Cloud Preview</strong>
-      <span>Runable is installing, repairing if needed, and opening your project here.</span>
-    </main>
-  </body>
-</html>`)
-        previewWindow.document.close()
-      } else {
-        showPopupHelp('Preview popup was blocked. Allow popups for this site, then click Open Preview after Cloud finishes.')
       }
     }
 
@@ -3936,11 +3966,13 @@ runpy.run_path(target, run_name="__main__")
     setCloudRunner((runner) => ({ ...runner, status: 'starting', error: '', logs: 'Starting Cloud Runner...', diagnostics: null }))
     setDevStatus('Cloud starting')
     setPreviewStatus('Uploading files to a hosted sandbox...')
+    updatePreviewTab({ status: 'uploading', message: 'Uploading project files to the cloud sandbox...' })
     writeTerminal('\r\n\x1b[1;36mStarting Cloud Runner on Vercel Sandbox...\x1b[0m\r\n')
 
     try {
       if (previousSandboxId) {
         setPreviewStatus('Stopping the previous cloud sandbox first...')
+        updatePreviewTab({ status: 'stopping', message: 'Stopping the previous cloud sandbox...' })
         await apiRequest('/api/cloud-runner', {
           method: 'POST',
           body: { action: 'stop', sandboxId: previousSandboxId },
@@ -3964,6 +3996,10 @@ runpy.run_path(target, run_name="__main__")
 
       const previewFileList = files.slice(0, 8).map((file) => file.path).join(', ')
       writeTerminal(`\x1b[36mCloud Runner source:\x1b[0m ${fileSource} (${files.length} files${previewFileList ? `: ${previewFileList}` : ''})\r\n`)
+      updatePreviewTab({
+        status: 'uploading',
+        message: `Uploading ${files.length} project files from ${fileSource}...`,
+      })
 
       if (persistFilesBeforeRun) {
         const data = await apiRequest('/api/projects', {
@@ -3991,6 +4027,10 @@ runpy.run_path(target, run_name="__main__")
         })
       }
 
+      updatePreviewTab({
+        status: 'running',
+        message: 'Installing dependencies and starting the dev server in Vercel Sandbox...',
+      })
       const body = {
         action: 'start',
         projectId: activeProject.id,
@@ -4003,6 +4043,14 @@ runpy.run_path(target, run_name="__main__")
       const result = await apiRequest('/api/cloud-runner', { method: 'POST', body })
       const logs = result.logs || 'Cloud Runner started.'
       writeTerminal(`${logs.replace(/\n/g, '\r\n')}\r\n`)
+      updatePreviewTab({
+        status: result.previewUrl ? 'ready' : 'finished',
+        message: result.previewUrl
+          ? 'Cloud server is ready. Opening your running project...'
+          : 'Cloud command finished, but it did not start a web preview.',
+        previewUrl: result.previewUrl || '',
+        logs,
+      })
       setCloudRunner({
         status: result.status || 'running',
         sandboxId: result.sandboxId || '',
@@ -4034,6 +4082,12 @@ runpy.run_path(target, run_name="__main__")
             }
           }
         }
+      } else if (previewWindow && !previewWindow.closed) {
+        updatePreviewTab({
+          status: 'finished',
+          message: 'Cloud command finished, but no preview URL was created. Run npm run dev, npm start, or Cloud Run on a web project.',
+          logs,
+        })
       }
       setDevStatus(result.previewUrl ? 'Cloud running' : 'Cloud finished')
       setPreviewStatus(result.previewUrl
@@ -4045,15 +4099,17 @@ runpy.run_path(target, run_name="__main__")
     } catch (error) {
       const details = error.details ? `\n${error.details}` : ''
       writeTerminal(`\r\n\x1b[1;31mCloud Runner failed:\x1b[0m ${error.message}${details}\r\n`)
-      if (previewWindow && !previewWindow.closed) {
-        previewWindow.document.body.innerHTML = `<main style="max-width: 720px; margin: 15vh auto; font-family: system-ui; color: #e5efff; background: #07111f; border: 1px solid #1d4ed8; border-radius: 12px; padding: 28px;"><strong>Cloud Runner failed</strong><pre style="white-space: pre-wrap; color: #93c5fd;">${escapeHtml(`${error.message}${details}`).slice(0, 4000)}</pre></main>`
-      }
+      updatePreviewTab({
+        status: 'error',
+        message: `Cloud Runner failed: ${error.message}`,
+        logs: `${error.message}${details}`,
+      })
       setCloudRunner((runner) => ({ ...runner, status: 'error', error: error.message }))
       setDevStatus('Cloud error')
       setPreviewStatus(`Cloud Runner failed: ${error.message}`)
       addProblem('Cloud Runner', error.message)
     }
-  }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, saveAllDirtyTabs, showPopupHelp, webcontainer, writeTerminal])
+  }, [activeCloudProject, addProblem, clearStaticPreview, cloudRunner.sandboxId, openCloudPreviewHandoff, publishCloudPreviewHandoff, saveAllDirtyTabs, showPopupHelp, webcontainer, writeTerminal])
 
   const runPackageInstall = useCallback(
     async (request = { command: 'npm', args: ['install'], label: 'npm install' }) => {

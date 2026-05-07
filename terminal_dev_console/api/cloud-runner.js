@@ -988,9 +988,13 @@ async function waitForPreviewReady(url, logs, timeoutMs = 30000) {
       const response = await fetchWithTimeout(url)
       const body = await response.text().catch(() => '')
       lastStatus = `HTTP ${response.status}`
-      if (response.status < 500 && !body.includes('Starting preview...')) {
+      const blockedHost = /Blocked request|server\.allowedHosts|not allowed/i.test(body)
+      if (response.ok && !body.includes('Starting preview...') && !blockedHost) {
         logs.push(`Preview responded with ${lastStatus}.`)
         return true
+      }
+      if (blockedHost) {
+        lastStatus = `${lastStatus} blocked by allowedHosts`
       }
     } catch (error) {
       lastStatus = error?.name === 'AbortError' ? 'request timed out' : (error?.message || 'connection failed')
